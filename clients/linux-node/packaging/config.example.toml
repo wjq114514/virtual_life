@@ -1,0 +1,55 @@
+schema_version = 1
+server_url = "http://127.0.0.1:8038"
+node_id = "linux-workstation"
+device_id = "change-me-to-a-stable-installation-id"
+label = "Linux 工作站"
+credential_file = "credentials"
+
+[desktop]
+backend = "niri"
+attention_enabled = false
+dms_enabled = true
+fish_activity_enabled = false
+# Opt-in window scene for server-side vision prompt enrichment.
+# scene_enabled reports app ids only; scene_titles_enabled additionally sends
+# sanitized window titles (user content) to the configured server.
+scene_enabled = false
+scene_titles_enabled = false
+scene_max_windows = 12
+
+[interaction]
+terminal = "kitty"
+auto_connect = false
+notifications = "status_only"
+
+# Screen vision capture (owner-token only; the daemon holds the token).
+# `vl screen start` creates the server session and streams grim screenshots.
+[screen]
+enabled = false
+# Defaults to the attached companion or the configured one below.
+companion_id = ""
+profile = "balanced"       # economy | balanced | detail
+mode = "continuous"        # continuous | one_shot
+display_id = "default"
+capture_binary = "grim"    # requires grim installed (niri speaks wlr-screencopy)
+capture_source = "other"   # x11 | wayland_portal | other
+
+[reporting]
+heartbeat_seconds = 20
+attention_seconds = 15
+attention_ttl_seconds = 45
+
+# Continuous voice (opt-in). The daemon owns capture, local ASR and playback;
+# `vl voice start` requires an attached presentation and an active lease.
+# Local ASR needs a verified sherpa-onnx model manifest; `vl voice doctor`
+# reports readiness. Without a model, use `--mode text` (typed turns) or keep
+# voice disabled and chat in text only.
+[voice]
+enabled = false
+asr_manifest = ""          # path to the local ASR model manifest (relative to config dir)
+input_device = ""          # PipeWire source node id; empty selects the default
+output_device = ""         # PipeWire sink node id; empty selects the default
+model_threads = 2
+heartbeat_seconds = 10
+max_buffered_audio_seconds = 8
+barge_in_mode = "vad_best_effort"  # manual | vad_best_effort

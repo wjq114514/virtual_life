@@ -1,0 +1,13 @@
+#!/bin/sh
+# Small POSIX launcher for the pinned, checked-in Gradle wrapper.
+set -eu
+android_node_project_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+if [ -n "${JAVA_HOME:-}" ]; then
+    android_node_java="$JAVA_HOME/bin/java"
+else
+    android_node_java=java
+fi
+exec "$android_node_java" ${JAVA_OPTS:-} ${GRADLE_OPTS:-} \
+    -Dorg.gradle.appname=gradlew \
+    -classpath "$android_node_project_dir/gradle/wrapper/gradle-wrapper.jar" \
+    org.gradle.wrapper.GradleWrapperMain "$@"

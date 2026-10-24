@@ -1,0 +1,360 @@
+# 复制为 virtual-life.toml；服务启动时读取，修改后重启。
+# 已设置的 VIRTUAL_LIFE_* 环境变量优先，包含显式设置的空字符串。
+# 本地配置可含密钥，virtual-life.toml 已加入 .gitignore。
+
+[server]
+# uv run python -m virtual_life 使用这里的监听设置。
+host = "127.0.0.1"
+port = 8000
+
+[logging]
+# 控制台与轮转文件日志。级别：DEBUG / INFO / WARNING / ERROR / CRITICAL。
+# 控制台在 TTY 下自动着色，设置 NO_COLOR=1 可关闭。
+level = "INFO"
+console = true
+file_enabled = true
+# 相对路径以本配置文件所在目录为基准；目录不存在时自动创建。
+file_path = ".data/logs/virtual-life.log"
+# 单文件达到 max_mb 后轮转，最多保留 backup_count 个历史文件。
+max_mb = 10
+backup_count = 3
+# 是否记录每个 HTTP 请求（方法、路径、状态、耗时和请求 ID）。
+# /healthz 与 /ui/ 静态资源只在 DEBUG 级别记录。
+access = true
+
+[runtime]
+# 相对路径以本配置文件所在目录为基准。
+database_path = ".data/runtime.sqlite3"
+api_token = "local-dev-token"
+node_ttl_seconds = 60
+lease_ttl_seconds = 10
+transfer_ttl_seconds = 30
+event_poll_seconds = 0.2
+reconcile_seconds = 0.5
+websocket_auth_timeout_seconds = 5.0
+
+[model]
+# base_url 与 name 必须同时填写或同时留空。
+# 留空时仍可查看记忆和本地预览人格提示。
+base_url = ""
+name = ""
+api_key = ""
+timeout_seconds = 60.0
+extra_body = {}
+# 兼容接口示例：填写自己提供商的根地址、模型名与密钥。
+# extra_body = { thinking = { type = "disabled" } }
+# extra_body 不能覆盖 model/messages/stream/输出预算/工具/响应格式等执行字段。
+#
+# 本地 MoE 模型服务器（llama.cpp）一键启动：
+#   export MODEL_PATH=/path/to/Qwen3-30B-A3B-Q4_K_M.gguf
+#   ./serve.py start              # 启动模型 + API
+#   ./serve.py start --api-only   # 只启动 API
+#   ./serve.py status             # 查看状态
+#   ./serve.py config             # 查看当前配置
+# 默认 MoE 优化：150K 上下文、65536 cache-reuse、Flash Attention、MLock。
+# 详见 ./serve.py --help 和 docs/configuration.md。
+#
+# 部分提供商（Together.ai、OpenRouter）支持显式 cache key：
+# extra_body = { prompt_cache_key = "virtual-life" }
+
+[scene_classifier]
+# 本地场景分类器；默认关闭，不影响现有对话链路。
+# off：不加载模型；observe：只检测并写入回执，不改变模型/提示/流式/输出；
+# route：按标签覆盖回复模型，仍受原有所有权、租约、预算、提示与输出 gate 约束。
+mode = "off"
+# 相对路径以本配置文件所在目录为基准（仅显式写入时）；环境变量路径按工作目录解析。
+artifact = ".data/nsfw_classifier/model/final"
+# auto / onnx / torch；auto 在安装 onnxruntime 且存在 ONNX 文件时优先 ONNX。
+backend = "auto"
+max_length = 128
+# 0 表示使用运行时默认线程数。
+threads = 0
+prefer_int8 = true
+# 送入分类器的用户消息字符上限；模型自身仍按 max_length 截断 token。
+max_chars = 2048
+# 单次推理等待上限；超时、忙碌、缺少依赖或模型加载失败都回退到正常对话。
+timeout_seconds = 1.0
+# route 模式按标签覆盖模型；空值或未列出的标签沿用 [model].name。
+# 至少配置一个非空模型，否则 route 模式启动校验失败。
+# models = { daily = "online-cheap-model", emotional = "online-strong-model", intimate = "local-uncensored-model", explicit = "local-uncensored-model" }
+
+[automatic_memory]
+# 自动提取事实、生成摘要和实体关系；与对话共享 [memory] 的模型额度。
+# 模型需要支持 response_format = {"type":"json_object"}。
+enabled = true
+batch_size = 4
+max_wait_seconds = 60.0
+poll_seconds = 2.0
+output_tokens = 1200
+
+[tools]
+# 对话和主动轮次可选启用模型工具调用；关闭时请求与旧版完全一致。
+# 每轮最多一次工具轮次，单轮最多 1-2 个工具调用。
+enabled = false
+max_calls_per_turn = 1
+# 受信任的插件工厂，格式为 module:callable；工厂接收 ToolPluginContext 并返回工具。
+# 最多 16 个定义，详见 docs/tools.md。
+plugins = []
+# 示例：plugins = ["my_package.tools:build"]
+
+[delegation]
+# 将 delegate_task 工具请求转交外部代理进程；默认关闭。
+# command 是 argv（不经 shell），必须恰好包含一个 {prompt} 参数。
+# 子进程仅继承 env_allowlist 中的环境变量，且受超时与输出上限约束。
+enabled = false
+command = []
+working_dir = ""
+timeout_seconds = 600.0
+max_output_chars = 16000
+env_allowlist = ["PATH", "HOME"]
+# 示例：command = ["python", "/opt/agents/run.py", "--prompt", "{prompt}"]
+
+[proactive_schedule]
+# schedule_next_proactive 工具的延迟边界（秒），以及到点时要求的用户静默时长。
+# 到点后仍须通过注意力、人格、预算、租约和冷却 gate，未通过则抑制该次候选。
+min_delay_seconds = 600
+max_delay_seconds = 86400
+min_idle_seconds = 3600
+
+[proactivity]
+# 调度注意力边界和内在活动候选；每个伙伴通过 /proactivity 显式启用。
+# 候选只在高门槛条件满足时入队，轮询本身不会无条件调用模型。
+poll_seconds = 2.0
+
+[inner_life]
+# 短时心理活动；内容始终由本地模板生成，不写人格/情绪/长期记忆。
+# 活动可作为主动候选来源，但仍须通过注意力、人格、预算、租约和输出 gate。
+# model_assisted 开启后，模型只评判标签与强度，失败时回退本地规则。
+poll_seconds = 10.0
+enabled = true
+min_activity_gap_seconds = 600
+activity_ttl_seconds = 3600
+min_evidence_items = 1
+proactive_urge_threshold = 0.65
+proactive_min_idle_seconds = 1200
+idle_saturation_seconds = 1800
+max_history = 200
+model_assisted = false
+model_min_interval_seconds = 3600
+model_daily_limit = 24
+model_output_token_limit = 200
+model_min_confidence = 0.55
+model_weight = 0.5
+# 环境变量优先：VIRTUAL_LIFE_INNER_LIFE_<字段大写>
+
+[memory]
+default_recall_tokens = 800
+max_recall_tokens = 4096
+default_max_items = 8
+max_recall_items = 50
+lexical_candidate_limit = 512
+background_candidate_limit = 128
+recency_half_life_days = 30.0
+# 以下 consolidation_* 控制本地整理计划；自动提取批次由 [automatic_memory] 控制。
+consolidation_threshold = 20
+consolidation_batch_size = 32
+consolidation_input_token_limit = 4000
+consolidation_output_token_limit = 400
+# 全运行时数据库共享；按 UTC 日记账，包含对话和自动记忆调用。
+daily_model_token_limit = 10000
+per_task_model_token_limit = 5000
+
+[memory.decay]
+# 只降低召回显著性，不删除记录；关闭时使用 recency_half_life_days。
+enabled = true
+routine_half_life_days = 30.0
+routine_floor = 0.1
+significant_half_life_days = 180.0
+significant_floor = 0.3
+stable_half_life_days = 365.0
+stable_floor = 0.5
+permanent_candidate_limit = 128
+reinforcement_min_coverage = 0.5
+semantic_salience_weight = 0.05
+
+[personality]
+max_personality_tokens = 1200
+max_prompt_tokens = 4096
+
+[personality.evolution]
+# 从本地证据生成有来源的人格提议；始终需要所有者显式采纳，绝不自改写。
+# 默认只用本地规则；model_assisted=true 且配置 [model] 后 use_model=true 走 model_v1。
+enabled = true
+model_assisted = false
+min_evidence_items = 3
+trait_window_seconds = 7776000
+max_trait_step = 0.05
+max_cumulative_drift = 0.2
+trait_cooldown_seconds = 604800
+max_open_proposals = 5
+proposal_ttl_seconds = 2592000
+quiet_request_rate_threshold = 0.4
+proactive_silent_rate_threshold = 0.6
+preference_repeat_threshold = 3
+# 环境变量优先：VIRTUAL_LIFE_PERSONALITY_EVOLUTION_<字段大写>
+
+[personality.slow_variables]
+# L2 长期慢变量：只读聚合，仅调制提示与参与，绝不写 L0 人格。
+# 读取不写库；证据不足时参与参数保持中性，新伙伴不受惩罚。
+enabled = true
+half_life_seconds = 2592000
+window_seconds = 31536000
+min_evidence_items = 3
+warm_valence_threshold = 0.1
+concern_valence_threshold = -0.05
+warmth_memory_scale = 3.0
+familiarity_scale = 12.0
+warmth_weight = 0.8
+engagement_min = 0.2
+engagement_max = 0.8
+# 环境变量优先：VIRTUAL_LIFE_PERSONALITY_SLOW_VARIABLES_<字段大写>
+
+[emotion]
+# 本地规则与记忆共鸣，不增加模型调用。修改后重启生效。
+enabled = true
+half_life_seconds = 1200
+# 各维度不填则沿用 half_life_seconds；范围均为 60..7200 秒。
+# valence_half_life_seconds = 1800
+# arousal_half_life_seconds = 600
+# control_half_life_seconds = 1200
+# resource_half_life_seconds = 2400
+candidate_limit = 256
+resonance_strength = 0.2
+
+[embedding]
+# 独立向量模型；启用后自动回填已有记忆，模型调用使用共享 token 额度。
+enabled = false
+base_url = ""
+name = ""
+api_key = ""
+# 本地 TEI 建议设为 2.0 左右：对话查询是内联的，失败应快速回退。
+timeout_seconds = 60.0
+# 不填则以首次成功响应确定维度；只有提供商支持时才填写。
+# 本地 BAAI/bge-base-zh-v1.5 使用 768。
+# dimensions = 1024
+extra_body = {}
+batch_size = 16
+max_input_tokens = 4000
+poll_seconds = 5.0
+# 本地余弦扫描最多考察这些有效向量，不是 ANN 索引。
+candidate_limit = 5000
+similarity_threshold = 0.25
+query_cache_size = 256
+query_cache_ttl_seconds = 300.0
+# 实际对话准备查询向量；普通预览和 recall 仅读缓存。
+dialogue_recall = true
+# 本地 TEI 等服务不产生按 token 费用；设为 true 时记录 usage 但不占用付费日额度。
+local = false
+# 同一模型名的后端升级/维度漂移时修改此标记，建立新空间并重新索引。
+space_identity = ""
+
+[rerank]
+# 仅显式 semantic-recall 使用；普通 recall、预览和对话主链路不调用。
+# CPU 建议 candidate_limit <= 8、timeout_seconds <= 0.5，超时会自动回退 RRF。
+# TEI CPU 容器建议加 --max-concurrent-requests 8；默认 512 会占用过多内存。
+# candidate_limit 不要超过容器的 --max-client-batch-size。
+enabled = false
+base_url = ""
+name = ""
+api_key = ""
+timeout_seconds = 0.5
+candidate_limit = 8
+min_candidates = 4
+# 原融合顺序先验权重；0 表示完全采用重排顺序，1 表示完全保留原顺序。
+rrf_weight = 0.15
+
+[knowledge_graph]
+max_hops = 2
+candidate_limit = 512
+
+[screen_vision]
+# 服务端屏幕视觉：客户端只需提供截图即可接入，OCR 与视觉模型在服务端。
+# 显式 enabled = true 且配置 base_url/name 后才启动 worker。
+enabled = false
+# 独立视觉 provider（OpenAI 兼容 chat/completions，接受 image_url data URI）。
+base_url = ""
+name = ""
+api_key = ""
+timeout_seconds = 30.0
+# 图片暂存目录；不进入仓库、静态路由或打包产物。
+storage_path = ".data/screen-vision"
+session_ttl_seconds = 1800
+frame_ttl_seconds = 90
+max_image_bytes = 8388608
+max_image_pixels = 12000000
+max_image_side = 8192
+global_concurrency = 2
+max_pending_global = 64
+max_pending_per_stream = 2
+max_uploads_per_minute_per_node = 30
+max_frames_per_minute_per_node = 30
+rate_burst = 5
+max_pending_manual_per_node = 1
+analysis_cache_ttl_seconds = 60
+# two_stage 下，对话派发前最多等待进行中的分析多少毫秒；0 表示不等待。
+evidence_wait_ms = 0
+comparison_window_frames = 20
+upload_retention_seconds = 300
+raw_retention_seconds = 600
+result_retention_seconds = 86400
+receipt_retention_seconds = 604800
+max_storage_bytes = 536870912
+# 紧凑输出：v5 提示词约 250 tokens 即完成，320 足够并防止失控长生成。
+output_tokens = 320
+max_model_images = 4
+# 0 表示不限制。用量仍记入 screen_vision_usage 供统计与观测。
+daily_model_call_limit = 0
+# 视觉子额度（0=不限制），包含预留与实际用量；仍受 [memory].per_task_model_token_limit 约束。
+daily_vision_token_limit = 0
+worker_poll_seconds = 0.5
+cleanup_interval_seconds = 30.0
+# 是否发送 response_format={"type":"json_object"}。GLM 系列不支持该字段，
+# 需设为 false（模型仍按提示返回 JSON）。默认 true。
+json_mode = true
+# 追加到视觉请求的 JSON 对象；推理模型通常需要关闭思考，例如
+# extra_body = { thinking = { type = "disabled" } }。不能覆盖执行或预算字段。
+extra_body = {}
+# 用客户端 client_features/host_metadata 的窗口上下文富化提示词，显著降低输出长度与耗时。
+enrichment = true
+# 不可信窗口标题的注入闸门：off | deterministic | decision | jev。
+# deterministic 为纯正则/隐藏字符检测，不调用模型；decision/jev 需配置下面的判定模型端点。
+injection_gate = "deterministic"
+injection_base_url = ""
+injection_api_key = ""
+injection_model = ""
+injection_timeout_seconds = 5.0
+injection_threshold = 0.5
+max_context_windows = 12
+max_context_chars = 1200
+
+[voice]
+# 麦克风、流式识别与轮次判断在客户端；此处仅启用文本轮次编排。
+enabled = false
+session_heartbeat_seconds = 10.0
+session_ttl_seconds = 30.0
+idle_timeout_seconds = 120.0
+session_max_seconds = 1800.0
+max_input_chars = 4096
+max_input_age_seconds = 10.0
+max_draining_per_companion = 1
+max_turns_per_session = 64
+event_buffer_size = 256
+
+[speech]
+# 服务端本地 TTS；模型与独立 Python 3.12 环境须先安装，启动不下载。
+enabled = false
+provider = "sherpa_onnx_kokoro"
+worker_python = ""
+model_dir = ".data/speech/models/kokoro"
+model_manifest = ""
+default_voice_id = "default"
+sample_rate = 24000
+global_concurrency = 1
+worker_threads = 2
+max_reply_chars = 600
+max_reply_audio_seconds = 60.0
+max_segment_chars = 80
+max_segment_audio_seconds = 10.0
+audio_ttl_seconds = 60
+max_pending_segments = 4
+max_buffered_playback_seconds = 8.0

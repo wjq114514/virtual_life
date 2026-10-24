@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Virtual Life
+Comment=Open the companion terminal renderer
+Exec=kitty --class virtual-life --title "Virtual Life" -e vl chat
+Icon=utilities-terminal
+Terminal=false
+Categories=Utility;Chat;

@@ -1,0 +1,37 @@
+{
+  "server_url": "http://127.0.0.1:8000",
+  "node_id": "home-gateway-telemetry",
+  "label": "Home gateway telemetry",
+  "device_class": "gateway",
+  "deployment_mode": "gateway",
+  "token_env": "VIRTUAL_LIFE_API_TOKEN",
+  "interval_seconds": 20,
+  "ttl_seconds": 60,
+  "disk_path": "/",
+  "request_timeout_seconds": 5,
+  "probe_timeout_seconds": 3,
+  "backoff_initial_seconds": 1,
+  "backoff_max_seconds": 60,
+  "observation_min_interval_seconds": 60,
+  "pending_observations_limit": 128,
+  "operation_file": null,
+  "targets": [
+    {
+      "node_id": "home-router-observed",
+      "label": "Home router observed endpoint",
+      "device_class": "router",
+      "adapter": "tcp",
+      "host": "192.0.2.1",
+      "port": 443,
+      "timeout_seconds": 3
+    },
+    {
+      "node_id": "home-nas-observed",
+      "label": "Home NAS observed endpoint",
+      "device_class": "nas",
+      "adapter": "http",
+      "url": "http://192.0.2.2:8080/healthz",
+      "timeout_seconds": 3
+    }
+  ]
+}

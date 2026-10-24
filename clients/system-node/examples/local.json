@@ -1,0 +1,18 @@
+{
+  "server_url": "http://127.0.0.1:8000",
+  "node_id": "lab-server-telemetry",
+  "label": "Lab server telemetry",
+  "device_class": "server",
+  "deployment_mode": "direct",
+  "token_env": "VIRTUAL_LIFE_API_TOKEN",
+  "interval_seconds": 20,
+  "ttl_seconds": 60,
+  "disk_path": "/",
+  "request_timeout_seconds": 5,
+  "backoff_initial_seconds": 1,
+  "backoff_max_seconds": 60,
+  "observation_min_interval_seconds": 60,
+  "pending_observations_limit": 128,
+  "operation_file": null,
+  "targets": []
+}

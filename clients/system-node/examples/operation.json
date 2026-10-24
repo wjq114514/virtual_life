@@ -1,0 +1,11 @@
+{
+  "operation_id": "deploy-20261011-1",
+  "subject_node_id": "lab-server-telemetry",
+  "origin_node_id": "my-desktop",
+  "kind": "deployment",
+  "phase": "started",
+  "label": "更新家庭服务",
+  "updated_at": "2026-10-11T08:00:00Z",
+  "ttl_seconds": 300,
+  "user_initiated": true
+}

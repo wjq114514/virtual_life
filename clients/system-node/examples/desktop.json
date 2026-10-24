@@ -1,0 +1,13 @@
+{
+  "server_url": "http://127.0.0.1:8000",
+  "node_id": "linux-workstation",
+  "label": "Linux workstation",
+  "device_class": "workstation",
+  "deployment_mode": "direct",
+  "token_env": "VIRTUAL_LIFE_API_TOKEN",
+  "interval_seconds": 20,
+  "ttl_seconds": 60,
+  "attention": {
+    "enabled": true
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "id": "virtual-life",
+  "name": "Virtual Life",
+  "version": "0.1.0",
+  "description": "Status-only bridge to the Virtual Life host daemon",
+  "surface": "status",
+  "entry": null,
+  "bridge": {
+    "kind": "process",
+    "command": ["vl", "status"],
+    "format": "json",
+    "poll_seconds": 5
+  },
+  "permissions": [],
+  "notes": "Read-only. The DMS bridge never holds the owner token and never sends messages."
+}

@@ -1,0 +1,13 @@
+// Append to ~/.config/niri/config.kdl. Binds a key to open the TUI in kitty.
+binds {
+    Mod+Shift+V { spawn "kitty" "--class" "virtual-life" "--title" "Virtual Life" "-e" "vl" "chat"; }
+}
+
+// Float the terminal renderer for a chat-like surface.
+window-rule {
+    match app-id=r#"^virtual-life$"#
+    open-floating true
+}
+
+// Optional: report boundary when the user returns to the desktop.
+// (Prefer the daemon's own adapter; this is a fallback hook.)

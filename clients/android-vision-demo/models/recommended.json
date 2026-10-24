@@ -1,0 +1,16 @@
+{
+  "repository": "taobao-mnn/Qwen3-VL-2B-Instruct-MNN",
+  "revision": "9e49ec71ded22500a997ed0f9961e1e92b85bbc9",
+  "directory": "Qwen3-VL-2B-Instruct-MNN",
+  "description": "Alibaba MNN export of Qwen3-VL-2B-Instruct, 4-bit language weights; image encoder included",
+  "files": [
+    {"name": "README.md", "size": 1241, "git_blob_sha1": "54957b514c90d296405b06a194d7b808740193b6"},
+    {"name": "config.json", "size": 605, "git_blob_sha1": "bc98854c95fccaa634e86ed926d9d3cacca1eb15"},
+    {"name": "llm_config.json", "size": 6445, "git_blob_sha1": "ebeab120a2337a7b6c45d7c8945a1f24fbe93990"},
+    {"name": "tokenizer.txt", "size": 3193555, "git_blob_sha1": "67de6de11a1791157332d6e9a404761de59c9c4d"},
+    {"name": "llm.mnn", "size": 462464, "sha256": "c2286f60cbd56a82f26bfeac92f6a96e9690889b1939346abfe9e1fae996a8f3"},
+    {"name": "llm.mnn.weight", "size": 1231860194, "sha256": "1554f9ce71743b56c2d7fba4cb0c2a31c7cddf4f21e1a2ff5a2e85b9a316a29f"},
+    {"name": "visual.mnn", "size": 502512, "sha256": "c489c1f65dc6aa5bcee42b3e291f7987df1111423c1fe570d0f3394e1207d2bb"},
+    {"name": "visual.mnn.weight", "size": 238226780, "sha256": "9feb04848cafad1117a510b43d6c2b58d6c31bef1040598156d266f9b42f581f"}
+  ]
+}

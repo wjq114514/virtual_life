@@ -1,0 +1,25 @@
+[Unit]
+Description=Virtual Life device state reporter
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+NotifyAccess=main
+TimeoutStartSec=30
+User=virtual-life
+WorkingDirectory=/opt/virtual-life-system-node
+EnvironmentFile=/etc/virtual-life-system-node/token.env
+ExecStart=/usr/bin/python3 /opt/virtual-life-system-node/current/system-node.pyz --config /etc/virtual-life-system-node/config.json --state-dir /var/lib/virtual-life-system-node
+Restart=on-failure
+RestartPreventExitStatus=2 3
+RestartSec=10
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/virtual-life-system-node
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

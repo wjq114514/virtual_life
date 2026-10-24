@@ -1,0 +1,26 @@
+[Unit]
+Description=Virtual Life Linux host daemon
+Documentation=https://github.com/
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=exec
+ExecStart=%h/.local/bin/vl daemon run
+Restart=on-failure
+RestartSec=3
+Environment=VIRTUAL_LIFE_CONFIG=%h/.config/virtual-life/linux/config.toml
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+# The socket and lock live under $XDG_RUNTIME_DIR; ProtectSystem=strict would
+# otherwise make /run/user/<uid> read-only and the daemon could not bind.
+RuntimeDirectory=virtual-life
+RuntimeDirectoryMode=0700
+ReadWritePaths=%h/.local/state/virtual-life
+ReadWritePaths=%h/.cache/virtual-life
+ReadWritePaths=%h/.config/virtual-life
+
+[Install]
+WantedBy=default.target
