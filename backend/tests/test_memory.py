@@ -401,3 +401,34 @@ def test_quiet_behavior_requires_participation_or_explicit_user_request():
     decision = policy.decide(ParticipationContext("quiet", True, True, True, True))
     assert decision.respond and decision.allow_audio
     assert policy.decide(ParticipationContext("chat", False, True)).respond
+
+
+def test_erase_companion_clears_all_memory_artifacts_and_is_idempotent(tmp_path):
+    service = MemoryService(tmp_path / "erase.sqlite3")
+    write(service, "e1", "我的生日是11月3日", kind="fact", semantic_key="user.birthday")
+    write(service, "e2", "喜欢喝茶", kind="preference", semantic_key="drink.preference")
+    service.erase_companion("sui", "erase-1")
+    assert service.list("sui")["total"] == 0
+    assert service.stats("sui")["total_records"] == 0
+    # Replay with the same command_id is idempotent and returns the same receipt.
+    replay = service.erase_companion("sui", "erase-1")
+    assert replay["erased"] is True
+    # A fresh command_id on an already-cleared companion still succeeds.
+    again = service.erase_companion("sui", "erase-2")
+    assert again["erased"] is True
+    # Another companion is untouched.
+    write(service, "e3", "别人的记忆", companion="two", kind="preference")
+    assert service.list("two")["total"] == 1
+
+
+def test_erase_companion_rejects_conflicting_command_id(tmp_path):
+    service = MemoryService(tmp_path / "erase-conflict.sqlite3")
+    service.erase_companion("sui", "erase-x")
+    # Same command_id for a different companion is an idempotency conflict,
+    # because the fingerprint is bound to the erased companion.
+    assert_error(
+        "idempotency_conflict",
+        service.erase_companion,
+        "two",
+        "erase-x",
+    )

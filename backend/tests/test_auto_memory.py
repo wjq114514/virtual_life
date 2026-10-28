@@ -1,7 +1,7 @@
 """Evidence constrained automatic extraction with scripted, free model responses."""
 
 import json
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from test_memory import Clock
@@ -25,12 +25,14 @@ class Extractor:
         )
 
 
-def environment(tmp_path):
+def environment(tmp_path, batch_size=1):
     clock = Clock()
     memory = MemoryService(tmp_path / "automatic.sqlite", clock=clock)
     SQLiteStore(memory.database_path)
     provider = Extractor()
-    auto = AutoMemoryService(memory, provider=provider, model_name="scripted", batch_size=1)
+    auto = AutoMemoryService(
+        memory, provider=provider, model_name="scripted", batch_size=batch_size
+    )
     memory.automatic_memory = auto
     return memory, auto, provider, clock
 
@@ -350,3 +352,121 @@ def test_first_person_exception_does_not_ground_user_object(tmp_path):
     result = auto.process_next("sui", force=True)
     assert result["relations_skipped"][0]["reason"] == "unsupported_endpoint"
     assert auto.graph("sui")["relations"] == []
+
+
+def test_birthday_reminder_scheduled_within_window(tmp_path):
+    clock = Clock()
+    clock.value = datetime(2026, 10, 28, tzinfo=UTC)
+    memory = MemoryService(tmp_path / "birthday.sqlite", clock=clock)
+    SQLiteStore(memory.database_path)
+    provider = Extractor()
+    reminders = []
+    auto = AutoMemoryService(
+        memory,
+        provider=provider,
+        model_name="scripted",
+        batch_size=1,
+        birthday_reminder=lambda companion_id, command_id, title, details, delay: reminders.append(
+            (companion_id, command_id, title, details, delay)
+        ),
+    )
+    memory.automatic_memory = auto
+    enqueue(memory, auto, clock, "b1", "我的生日是11月3日")
+    extract(provider, fact("b1", "我的生日是11月3日", "user.birthday"))
+    result = auto.process_next("sui", force=True)
+    assert result["status"] == "completed"
+    assert len(reminders) == 1
+    companion_id, command_id, title, details, delay = reminders[0]
+    assert companion_id == "sui"
+    assert command_id.startswith("bday-")
+    assert title == "11月3日生日提醒"
+    assert "11" in details and "3" in details
+    assert 60 <= delay <= 2_592_000
+    assert delay > 0
+
+
+def test_birthday_reminder_skipped_outside_window(tmp_path):
+    clock = Clock()
+    clock.value = datetime(2026, 10, 28, tzinfo=UTC)
+    memory = MemoryService(tmp_path / "birthday-far.sqlite", clock=clock)
+    SQLiteStore(memory.database_path)
+    provider = Extractor()
+    reminders = []
+    auto = AutoMemoryService(
+        memory,
+        provider=provider,
+        model_name="scripted",
+        batch_size=1,
+        birthday_reminder=lambda companion_id, command_id, title, details, delay: reminders.append(
+            delay
+        ),
+    )
+    memory.automatic_memory = auto
+    enqueue(memory, auto, clock, "b2", "我的生日是6月18日")
+    extract(provider, fact("b2", "我的生日是6月18日", "user.birthday"))
+    auto.process_next("sui", force=True)
+    assert reminders == []
+
+
+def test_birthday_reminder_no_callback_is_noop(tmp_path):
+    memory, auto, provider, clock = environment(tmp_path)
+    enqueue(memory, auto, clock, "b3", "我的生日是11月3日")
+    extract(provider, fact("b3", "我的生日是11月3日", "user.birthday"))
+    result = auto.process_next("sui", force=True)
+    assert result["status"] == "completed"
+
+
+def test_birthday_reminder_uses_exact_seconds(tmp_path):
+    from virtual_life.auto_memory import _seconds_until_birthday, parse_birthday_month_day
+
+    parsed = parse_birthday_month_day("我的生日是11月3日")
+    assert parsed == (11, 3)
+    now = datetime(2026, 10, 28, 12, 0, 0, tzinfo=UTC)
+    seconds = _seconds_until_birthday(11, 3, now)
+    # 11月3日 00:00 UTC minus 10月28日 12:00 UTC = 5.5 days
+    assert seconds == int(5.5 * 86400)
+
+
+def test_stale_summary_rebuild_re_enqueues_live_sources(tmp_path):
+    memory, auto, provider, clock = environment(tmp_path, batch_size=2)
+    # Two sources processed in one batch produce one summary depending on both.
+    enqueue(memory, auto, clock, "e1", "顾言是我的室友")
+    enqueue(memory, auto, clock, "e2", "我喜欢乌龙茶", assistant="记住了")
+    extract(
+        provider,
+        fact("e1", "顾言是我的室友", "roommate", kind="relationship"),
+        fact("e2", "我喜欢乌龙茶", "preferred_drink"),
+        summary="用户有室友，且喜欢乌龙茶。",
+        relations=[{"subject": "用户", "predicate": "室友", "object": "顾言", "memory_index": 0}],
+    )
+    result = auto.process_next("sui", force=True)
+    assert result["status"] == "completed"
+    summary = auto.summaries("sui")["items"]
+    assert len(summary) == 1
+    # The summary depends on both source episodes (and the resolved facts).
+    assert set(summary[0]["source_event_ids"]) == {"e1", "e2"}
+    assert {v["memory_id"] for v in summary[0]["memory_versions"]} == {
+        v["memory_id"] for v in result["source_memory_versions"]
+    } | {v["memory_id"] for v in result["memory_versions"]}
+    # Delete one source episode: the summary that depended on it becomes stale.
+    episodes = [r for r in memory.list("sui")["items"] if r["kind"] == "episode"]
+    deleted_id = next(r["memory_id"] for r in episodes if "乌龙茶" in r["content"])
+    memory.delete("sui", deleted_id)
+    assert auto.summaries("sui")["items"] == []
+    # Rebuild: the stale summary's surviving source is re-enqueued.
+    pruned = auto.prune_derivatives("sui", rebuild=True)
+    assert pruned == 1
+    with memory._connection() as connection:
+        pending = connection.execute(
+            "SELECT COUNT(*) FROM auto_memory_queue WHERE companion_id='sui' AND status='pending'"
+        ).fetchone()[0]
+    assert pending == 1
+    # The worker regenerates a fresh summary from the surviving source.
+    extract(
+        provider,
+        fact("e1", "顾言是我的室友", "roommate", kind="relationship"),
+        summary="用户说顾言是室友。",
+    )
+    result = auto.process_next("sui", force=True)
+    assert result["status"] == "completed"
+    assert len(auto.summaries("sui")["items"]) == 1

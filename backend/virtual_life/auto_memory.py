@@ -4,7 +4,7 @@ import hashlib
 import json
 import re
 import uuid
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Literal
 
@@ -15,6 +15,7 @@ from .knowledge_graph import GraphAliasUpdate as GraphAliasUpdate
 from .memory import MemoryError, _normalize, _terms
 from .model_provider import ProviderError, estimate_chat_input_tokens
 from .ports import ModelRequest
+from .proactivity import MAX_TASK_DELAY_SECONDS, MIN_TASK_DELAY_SECONDS
 
 Text = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=2048)]
 ShortText = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=128)]
@@ -111,6 +112,128 @@ def _birthday_evidence(evidence: str) -> bool:
     return bool(marker and date)
 
 
+_CN_NUMERALS = {
+    "一": 1,
+    "二": 2,
+    "三": 3,
+    "四": 4,
+    "五": 5,
+    "六": 6,
+    "七": 7,
+    "八": 8,
+    "九": 9,
+    "十": 10,
+    "零": 0,
+    "〇": 0,
+    "两": 2,
+    "正": 1,
+    "冬": 11,
+    "腊": 12,
+}
+_CN_UNITS = {"十": 10, "百": 100}
+
+
+def _cn_numeral(text: str) -> int | None:
+    if not text:
+        return None
+    text = text.strip()
+    if text.isdigit():
+        return int(text)
+    # Handle 十 / 十一 / 二十 / 二十一 style numerals and single characters.
+    total = 0
+    seen_unit = False
+    for character in text:
+        if character in _CN_UNITS:
+            value = _CN_UNITS[character]
+            total = (total or 1) * value
+            seen_unit = True
+        elif character in _CN_NUMERALS:
+            digit = _CN_NUMERALS[character]
+            if seen_unit and total >= 10 and digit:
+                total += digit
+            elif seen_unit:
+                total = total * 10 + digit
+            else:
+                total = total * 10 + digit
+                seen_unit = False
+        else:
+            return None
+    return total
+
+
+def parse_birthday_month_day(text: str) -> tuple[int, int] | None:
+    """Extract a (month, day) from birthday text like 6月18日 / 十一月三日 / June 18th.
+
+    Returns None when the text does not contain an unambiguous month and day.
+    """
+    match = re.search(
+        r"([0-9一二三四五六七八九十零〇两正冬腊]{1,3})\s*月\s*初?"
+        r"([0-9一二三四五六七八九十零〇两]{1,3})\s*[日号]?",
+        text,
+    )
+    if match:
+        month = _cn_numeral(match.group(1))
+        day = _cn_numeral(match.group(2))
+        if month is not None and day is not None and 1 <= month <= 12 and 1 <= day <= 31:
+            return (month, day)
+    month_names = {
+        "january": 1,
+        "jan": 1,
+        "february": 2,
+        "feb": 2,
+        "march": 3,
+        "mar": 3,
+        "april": 4,
+        "apr": 4,
+        "may": 5,
+        "june": 6,
+        "jun": 6,
+        "july": 7,
+        "jul": 7,
+        "august": 8,
+        "aug": 8,
+        "september": 9,
+        "sep": 9,
+        "sept": 9,
+        "october": 10,
+        "oct": 10,
+        "november": 11,
+        "nov": 11,
+        "december": 12,
+        "dec": 12,
+    }
+    match = re.search(r"([A-Za-z]{3,9})\.?\s+(\d{1,2})(?:st|nd|rd|th)?", text, re.IGNORECASE)
+    if match:
+        month = month_names.get(match.group(1).lower())
+        day = int(match.group(2))
+        if month is not None and 1 <= day <= 31:
+            return (month, day)
+    match = re.search(
+        r"(\d{1,2})(?:st|nd|rd|th)?\s+(?:of\s+)?([A-Za-z]{3,9})\.?", text, re.IGNORECASE
+    )
+    if match:
+        day = int(match.group(1))
+        month = month_names.get(match.group(2).lower())
+        if month is not None and 1 <= day <= 31:
+            return (month, day)
+    # ISO or slash date: keep only month/day if the year is present.
+    match = re.search(r"(?<!\d)(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})(?!\d)", text)
+    if match:
+        month, day = int(match.group(2)), int(match.group(3))
+        if 1 <= month <= 12 and 1 <= day <= 31:
+            return (month, day)
+    return None
+
+
+def _seconds_until_birthday(month: int, day: int, now: datetime) -> int:
+    """Seconds from now until the start (UTC midnight) of the next month/day."""
+    year = now.year
+    candidate = datetime(year, month, day, tzinfo=UTC)
+    if candidate <= now:
+        candidate = datetime(year + 1, month, day, tzinfo=UTC)
+    return int((candidate - now).total_seconds())
+
+
 def _relation_grounding_reason(relation: ExtractedRelation, memory: ExtractedMemory):
     """Check quoted endpoint support, not general natural language entailment."""
     evidence = _normalize(memory.evidence)
@@ -168,11 +291,13 @@ class AutoMemoryService:
         output_token_limit=1200,
         graph_max_hops=2,
         graph_candidate_limit=512,
+        birthday_reminder=None,
     ):
         self.memory = memory_service
         self.provider = provider
         self.model_name = model_name
         self.enabled = enabled
+        self.birthday_reminder = birthday_reminder
         if not 1 <= batch_size <= 32 or not 0 <= max_wait_seconds <= 86400:
             raise ValueError("Invalid automatic memory batch configuration")
         if not 1 <= output_token_limit <= 64000:
@@ -907,7 +1032,63 @@ class AutoMemoryService:
                 )
         if not valid:
             return self._finish(job_id, "discarded", "source_invalid", usage)
+        self._schedule_birthday_reminders(companion_id, resolved, output)
         return {"job_id": job_id, "status": status, "error_code": None, "usage": usage, **result}
+
+    def _schedule_birthday_reminders(self, companion_id, resolved, output):
+        """Schedule a durable reminder when a birthday fact is written.
+
+        Only facts whose semantic key is a known birthday slot and whose content
+        carries an unambiguous month/day are considered. The reminder goes
+        through the same scheduled-task channel as a model-created reminder, so
+        it honours the quiet, attention, budget and lease gates at delivery.
+        Failures are logged and never break the memory commit.
+        """
+        if self.birthday_reminder is None:
+            return
+        for index, item in enumerate(output.memories):
+            reference = resolved[index] if index < len(resolved) else None
+            if reference is None:
+                continue
+            key = (item.semantic_key or "").strip()
+            if not re.search(
+                r"(?:^|[:._/-])(?:birthday|birth_date|date_of_birth|生日|出生日期)$",
+                _normalize(key),
+            ):
+                continue
+            parsed = parse_birthday_month_day(item.content)
+            if parsed is None:
+                continue
+            month, day = parsed
+            now = self.memory._now()
+            seconds = _seconds_until_birthday(month, day, now)
+            if seconds < MIN_TASK_DELAY_SECONDS or seconds > MAX_TASK_DELAY_SECONDS:
+                # Outside the reminder window; the permanent fact stays and a
+                # later re-write or the next year's pass can schedule it.
+                continue
+            identity = "birthday:" + reference["memory_id"] + ":" + str(month) + "-" + str(day)
+            command_id = "bday-" + hashlib.sha256(identity.encode()).hexdigest()[:24]
+            title = f"{month}月{day}日生日提醒"
+            details = f"今天是 {month} 月 {day} 日，是生日。记得送上祝福。"
+            try:
+                self.birthday_reminder(
+                    companion_id,
+                    command_id,
+                    title,
+                    details,
+                    seconds,
+                )
+            except Exception:
+                # Reminder scheduling must never fail the memory commit.
+                self.memory.logs.record(
+                    companion_id,
+                    "automation",
+                    "failed",
+                    details={
+                        "error_code": "birthday_reminder_failed",
+                        "memory_id": reference["memory_id"],
+                    },
+                )
 
     @staticmethod
     def _unique_versions(versions):
@@ -947,6 +1128,25 @@ class AutoMemoryService:
             ),
         )
 
+    def _stale_derivative_where(self):
+        """SQL fragment selecting derivatives whose sources are no longer live.
+
+        Shared by recall (which hides stale rows) and maintenance (which deletes
+        them), so the two never disagree about liveness.
+        """
+        return """NOT EXISTS (
+            SELECT 1 FROM json_each(d.versions_json) v LEFT JOIN memory_records m
+            ON m.memory_id=json_extract(v.value,'$.memory_id') AND m.companion_id=d.companion_id
+            WHERE m.memory_id IS NULL OR m.active!=1 OR m.revision!=json_extract(v.value,'$.revision')
+            OR NOT ({supported})
+            OR (m.kind!='episode' AND ((m.valid_from IS NOT NULL AND m.valid_from>?)
+            OR (m.valid_to IS NOT NULL AND m.valid_to<=?))))
+            AND NOT EXISTS (SELECT 1 FROM json_each(d.source_events_json) e
+            WHERE NOT EXISTS (SELECT 1 FROM events original WHERE original.event_id=e.value
+            AND original.companion_id=d.companion_id)
+            OR EXISTS (SELECT 1 FROM memory_source_tombstones t
+            WHERE t.companion_id=d.companion_id AND t.source_event_id=e.value))"""
+
     def _live_derivatives(
         self,
         connection,
@@ -959,18 +1159,7 @@ class AutoMemoryService:
         count_only=False,
     ):
         params = [companion_id, self.memory._timestamp(self.memory._now())]
-        where = """d.companion_id=? AND NOT EXISTS (
-            SELECT 1 FROM json_each(d.versions_json) v LEFT JOIN memory_records m
-            ON m.memory_id=json_extract(v.value,'$.memory_id') AND m.companion_id=d.companion_id
-            WHERE m.memory_id IS NULL OR m.active!=1 OR m.revision!=json_extract(v.value,'$.revision')
-            OR NOT ({supported})
-            OR (m.kind!='episode' AND ((m.valid_from IS NOT NULL AND m.valid_from>?)
-            OR (m.valid_to IS NOT NULL AND m.valid_to<=?))))
-            AND NOT EXISTS (SELECT 1 FROM json_each(d.source_events_json) e
-            WHERE NOT EXISTS (SELECT 1 FROM events original WHERE original.event_id=e.value
-            AND original.companion_id=d.companion_id)
-            OR EXISTS (SELECT 1 FROM memory_source_tombstones t
-            WHERE t.companion_id=d.companion_id AND t.source_event_id=e.value))"""
+        where = "d.companion_id=? AND " + self._stale_derivative_where()
         where = where.format(supported=self.memory._supported_clause("m"))
         params.append(params[1])
         if kind:
@@ -1009,6 +1198,119 @@ class AutoMemoryService:
             }
             for row in rows
         ]
+
+    def prune_derivatives(self, companion_id=None, *, limit=500, rebuild=False):
+        """Delete derivatives whose source memories or events are no longer live.
+
+        Recall already hides stale derivatives; this keeps the table from
+        accumulating rows that will never be read. Pass a companion_id to limit
+        the sweep to one companion, or None to sweep every companion. Returns
+        the number of rows removed. Safe to call repeatedly; no rows are
+        deleted when everything is still live.
+
+        When ``rebuild`` is true, stale *summary* derivatives are not just
+        deleted: their still-live source events are re-enqueued (with the
+        current episode revision) so the worker regenerates a fresh summary
+        from the surviving sources, and the stale summary row is removed.
+        Relations are never rebuilt — a stale edge is simply dropped.
+        """
+        if companion_id is not None:
+            companion_id = self.memory._identifier(companion_id, "companion_id")
+        live = self._stale_derivative_where().format(supported=self.memory._supported_clause("m"))
+        now = self.memory._timestamp(self.memory._now())
+        with self.memory._connection(write=True) as connection:
+            scope = ""
+            params = [now, now]
+            if companion_id is not None:
+                scope = " AND d.companion_id=?"
+                params.append(companion_id)
+            rows = connection.execute(
+                "SELECT derivative_id,companion_id,kind,source_events_json FROM "
+                "auto_memory_derivatives d WHERE NOT (" + live + ")" + scope + " LIMIT ?",
+                [*params, limit],
+            ).fetchall()
+            ids = [row["derivative_id"] for row in rows]
+            if rebuild:
+                self._rebuild_stale_summaries(connection, rows)
+            if ids:
+                placeholders = ",".join("?" for _ in ids)
+                connection.execute(
+                    "DELETE FROM auto_memory_derivatives WHERE derivative_id IN ("
+                    + placeholders
+                    + ")",
+                    ids,
+                )
+            return len(ids)
+
+    def _rebuild_stale_summaries(self, connection, rows) -> None:
+        """Re-enqueue live source events of stale summaries for regeneration.
+
+        A stale summary lost one or more sources; its surviving sources may
+        still support a useful summary. Each live source event that is not
+        already pending (or running under another job) is inserted back into
+        the queue with its current episode revision, so the worker produces a
+        fresh summary that reflects only what still exists. Deleted or
+        tombstoned sources are not replayed.
+        """
+        for row in rows:
+            if row["kind"] != "summary":
+                continue
+            companion_id = row["companion_id"]
+            for event_id in json.loads(row["source_events_json"]):
+                # The source event must still exist and not be tombstoned.
+                event = connection.execute(
+                    "SELECT * FROM events WHERE event_id=? AND companion_id=?",
+                    (event_id, companion_id),
+                ).fetchone()
+                if (
+                    event is None
+                    or connection.execute(
+                        "SELECT 1 FROM memory_source_tombstones WHERE companion_id=? AND source_event_id=?",
+                        (companion_id, event_id),
+                    ).fetchone()
+                ):
+                    continue
+                # Reuse the current live episode revision, or drop the source
+                # when its episode was deleted/updated beyond the queue entry.
+                episode = connection.execute(
+                    "SELECT memory_id,revision FROM memory_records WHERE companion_id=? "
+                    "AND kind='episode' AND episode_identity=? AND active=1 ORDER BY revision DESC LIMIT 1",
+                    (companion_id, "event:" + event_id),
+                ).fetchone()
+                if episode is None:
+                    continue
+                # Already pending or running under another job: keep that entry.
+                pending = connection.execute(
+                    "SELECT status FROM auto_memory_queue WHERE event_id=? AND companion_id=?",
+                    (event_id, companion_id),
+                ).fetchone()
+                now = self.memory._timestamp(self.memory._now())
+                if pending is not None:
+                    if pending["status"] in ("pending", "running"):
+                        continue
+                    # A terminal queue row keeps its event_id (primary key); flip
+                    # it back to pending with the current episode revision so the
+                    # worker regenerates the surviving sources.
+                    connection.execute(
+                        "UPDATE auto_memory_queue SET status='pending',job_id=NULL,"
+                        "next_attempt_at=NULL,source_memory_id=?,source_revision=?,created_at=? "
+                        "WHERE event_id=? AND companion_id=?",
+                        (episode["memory_id"], episode["revision"], now, event_id, companion_id),
+                    )
+                    continue
+                connection.execute(
+                    """INSERT INTO auto_memory_queue
+                    (event_id,companion_id,payload_json,created_at,status,source_memory_id,source_revision)
+                    VALUES(?,?,?,?,'pending',?,?)""",
+                    (
+                        event_id,
+                        companion_id,
+                        _json(event),
+                        now,
+                        episode["memory_id"],
+                        episode["revision"],
+                    ),
+                )
 
     @staticmethod
     def _page(limit, offset=0):

@@ -15,6 +15,7 @@ OPERATIONS = frozenset(
         "update_metadata",
         "correct",
         "delete",
+        "erase",
         "recall",
         "reinforcement",
         "automation",

@@ -1651,6 +1651,143 @@ class MemoryService:
             )
         return {"memory_id": memory_id, "deleted": True}
 
+    def erase_companion(self, companion_id: str, command_id: str) -> dict:
+        """Completely erase every memory-domain artifact for one companion.
+
+        This is the documented "complete forgetting" protocol (distinct from
+        ``delete``, which removes one record). It clears the memory records,
+        provenance, term index, access state, usage receipts, automatic-memory
+        queue/jobs/owned/evidence/derivatives/entities, embeddings, query cache,
+        token ledger, and the memory command log. It also records a content-free
+        command tombstone so a replayed ``command_id`` cannot resurrect anything,
+        and tombstones the underlying source events so the automatic worker will
+        not re-extract already-forgotten dialogue.
+
+        The companion row itself, dialogue commands, events, personality,
+        emotion, inner life, proactivity and device state are deliberately left
+        intact: they belong to other owners and are erased by their own
+        protocols. Returns a count summary.
+        """
+        companion_id = self._identifier(companion_id, "companion_id")
+        command_id = self._identifier(command_id, "command_id")
+        fingerprint = self._fingerprint(
+            {"operation": "erase_companion", "companion_id": companion_id}
+        )
+        with self._connection(write=True) as connection:
+            existing = connection.execute(
+                "SELECT fingerprint FROM memory_commands WHERE command_id = ?",
+                (command_id,),
+            ).fetchone()
+            if existing is not None:
+                if existing["fingerprint"] != fingerprint:
+                    raise MemoryError(
+                        409,
+                        "idempotency_conflict",
+                        "command_id was already used with another payload",
+                    )
+                return json.loads(
+                    connection.execute(
+                        "SELECT result_json FROM memory_commands WHERE command_id = ?",
+                        (command_id,),
+                    ).fetchone()[0]
+                )
+            counts: dict[str, int] = {}
+
+            def table_exists(name: str) -> bool:
+                return (
+                    connection.execute(
+                        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)
+                    ).fetchone()
+                    is not None
+                )
+
+            def count_memories(table: str, where: str, params: tuple) -> None:
+                counts[table] = connection.execute(
+                    f"SELECT COUNT(*) FROM {table} WHERE {where}", params
+                ).fetchone()[0]
+
+            # Source events that fed automatic extraction: remember them as
+            # tombstones before deleting, so a replay of an old event cannot
+            # re-consolidate already-forgotten dialogue.
+            connection.execute(
+                """INSERT OR IGNORE INTO memory_source_tombstones(companion_id, source_event_id)
+                   SELECT DISTINCT m.companion_id, p.source_event_id
+                   FROM memory_provenance p JOIN memory_records m ON m.memory_id = p.memory_id
+                   WHERE m.companion_id = ?""",
+                (companion_id,),
+            )
+            # The automatic queue holds payload copies of the source events.
+            if table_exists("auto_memory_queue"):
+                connection.execute(
+                    """INSERT OR IGNORE INTO memory_source_tombstones(companion_id, source_event_id)
+                       SELECT companion_id, event_id FROM auto_memory_queue WHERE companion_id = ?""",
+                    (companion_id,),
+                )
+            for table, column in (
+                ("memory_terms", "companion_id"),
+                ("memory_access_state", None),
+                ("memory_usage_receipts", None),
+                ("auto_memory_evidence", None),
+                ("auto_memory_owned", None),
+                ("auto_memory_queue", "companion_id"),
+                ("auto_memory_jobs", "companion_id"),
+                ("auto_memory_derivatives", "companion_id"),
+                ("auto_memory_entities", "companion_id"),
+                ("memory_provenance", None),
+                ("memory_records", "companion_id"),
+                ("memory_commands", "companion_id"),
+                ("memory_token_tasks", "companion_id"),
+                ("embedding_vectors", "companion_id"),
+                ("embedding_attempts", "job_id"),
+                ("embedding_jobs", "companion_id"),
+                ("embedding_query_cache", "companion_id"),
+                ("embedding_deferred", "companion_id"),
+            ):
+                if not table_exists(table):
+                    continue
+                if table == "memory_access_state":
+                    where = (
+                        "memory_id IN (SELECT memory_id FROM memory_records WHERE companion_id = ?)"
+                    )
+                elif table == "memory_usage_receipts":
+                    where = (
+                        "memory_id IN (SELECT memory_id FROM memory_records WHERE companion_id = ?)"
+                    )
+                elif table in ("auto_memory_evidence", "auto_memory_owned"):
+                    where = (
+                        "memory_id IN (SELECT memory_id FROM memory_records WHERE companion_id = ?)"
+                    )
+                elif table == "memory_provenance":
+                    where = (
+                        "memory_id IN (SELECT memory_id FROM memory_records WHERE companion_id = ?)"
+                    )
+                elif table == "embedding_attempts":
+                    where = "job_id IN (SELECT job_id FROM embedding_jobs WHERE companion_id = ?)"
+                else:
+                    where = f"{column} = ?"
+                count_memories(table, where, (companion_id,))
+                connection.execute(f"DELETE FROM {table} WHERE {where}", (companion_id,))
+            # Graph entities, aliases and alias receipts are companion scoped.
+            for table in ("graph_entities", "graph_aliases", "graph_alias_receipts"):
+                if not table_exists(table):
+                    continue
+                count_memories(table, "companion_id = ?", (companion_id,))
+                connection.execute(f"DELETE FROM {table} WHERE companion_id = ?", (companion_id,))
+            # Content-free command tombstone: the replay is idempotent and cannot
+            # resurrect any erased content because no payload is stored.
+            now = self._timestamp(self._now())
+            connection.execute(
+                "INSERT INTO memory_commands(command_id, companion_id, fingerprint, result_json, created_at) VALUES (?, ?, ?, ?, ?)",
+                (command_id, companion_id, fingerprint, json.dumps({"erased": True}), now),
+            )
+            self.logs.record(
+                companion_id,
+                "erase",
+                details={"command_id": command_id, "erased": True, "counts": counts},
+                connection=connection,
+            )
+            return {"companion_id": companion_id, "erased": True, "counts": counts}
+
     def policy_snapshot(self) -> dict:
         automation = self.automatic_memory
         embeddings = self.embedding_memory
