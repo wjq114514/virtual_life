@@ -20,6 +20,7 @@ from .models import (
     NodeHeartbeat,
     NodeRegister,
     ObservationCreate,
+    RoomFollow,
     TransferAck,
     TransferPrepare,
     bounded_json,
@@ -99,6 +100,9 @@ class Coordinator:
         transfer_ttl_seconds: float = 30,
         clock: Callable[[], datetime] | None = None,
         routing_policy: RoutingPolicy | None = None,
+        *,
+        auto_follow_rooms: bool = True,
+        auto_follow_quiet_seconds: float = 15,
     ) -> None:
         for name, value in (
             ("node_ttl_seconds", node_ttl_seconds),
@@ -112,9 +116,18 @@ class Coordinator:
                 or value <= 0
             ):
                 raise ValueError(f"{name} must be a finite positive number")
+        if (
+            isinstance(auto_follow_quiet_seconds, bool)
+            or not isinstance(auto_follow_quiet_seconds, (int, float))
+            or not math.isfinite(auto_follow_quiet_seconds)
+            or auto_follow_quiet_seconds < 0
+        ):
+            raise ValueError("auto_follow_quiet_seconds must be a finite nonnegative number")
         self.node_ttl_seconds = float(node_ttl_seconds)
         self.lease_ttl_seconds = float(lease_ttl_seconds)
         self.transfer_ttl_seconds = float(transfer_ttl_seconds)
+        self.auto_follow_rooms = bool(auto_follow_rooms)
+        self.auto_follow_quiet_seconds = float(auto_follow_quiet_seconds)
         self.clock = clock or (lambda: datetime.now(UTC))
         self.routing_policy = routing_policy or default_routing_policy
         self.store = SQLiteStore(database_path)
@@ -122,6 +135,21 @@ class Coordinator:
             columns = {row["name"] for row in connection.execute("PRAGMA table_info(transfers)")}
             if "target_presentation_id" not in columns:
                 connection.execute("ALTER TABLE transfers ADD COLUMN target_presentation_id TEXT")
+            columns = {row["name"] for row in connection.execute("PRAGMA table_info(companions)")}
+            if "last_activity_node_id" not in columns:
+                connection.execute("ALTER TABLE companions ADD COLUMN last_activity_node_id TEXT")
+            if "last_activity_at" not in columns:
+                connection.execute("ALTER TABLE companions ADD COLUMN last_activity_at TEXT")
+            # Cursor for the most recent accepted device_state writer, so a
+            # stale session or an out-of-order sample cannot overwrite a newer
+            # snapshot (multi-writer arbitration for device-state heartbeats).
+            columns = {row["name"] for row in connection.execute("PRAGMA table_info(nodes)")}
+            if "device_state_session_id" not in columns:
+                connection.execute("ALTER TABLE nodes ADD COLUMN device_state_session_id TEXT")
+            if "device_state_sequence" not in columns:
+                connection.execute("ALTER TABLE nodes ADD COLUMN device_state_sequence INTEGER")
+            if "device_state_at" not in columns:
+                connection.execute("ALTER TABLE nodes ADD COLUMN device_state_at TEXT")
         from .devices import DeviceService
 
         self.devices = DeviceService(self)
@@ -205,6 +233,12 @@ class Coordinator:
         return row
 
     def _node(self, row: sqlite3.Row, now: datetime, connection: sqlite3.Connection) -> JsonDict:
+        # A node is a *room*. It is occupied when the companion's active node is
+        # this node; otherwise it is empty but keeps its capabilities and tools
+        # so the runtime can still call into it on demand.
+        occupied = connection.execute(
+            "SELECT 1 FROM companions WHERE active_node_id = ? LIMIT 1", (row["node_id"],)
+        ).fetchone()
         snapshot = {
             "node_id": row["node_id"],
             "label": row["label"],
@@ -213,6 +247,7 @@ class Coordinator:
             "context": json.loads(row["context_json"]),
             "online": now
             < _instant(row["last_seen_at"]) + timedelta(seconds=self.node_ttl_seconds),
+            "room_state": "occupied" if occupied else "empty",
             "created_at": row["created_at"],
             "last_seen_at": row["last_seen_at"],
         }
@@ -234,6 +269,12 @@ class Coordinator:
             "memory_refs": json.loads(row["memory_refs_json"]),
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
+            "last_activity_node_id": row["last_activity_node_id"]
+            if "last_activity_node_id" in row.keys()
+            else None,
+            "last_activity_at": row["last_activity_at"]
+            if "last_activity_at" in row.keys()
+            else None,
         }
 
     @staticmethod
@@ -350,6 +391,51 @@ class Coordinator:
                 self._row(connection, "nodes", "node_id", node_id), self._now(), connection
             )
 
+    def _accept_device_state(
+        self, connection: sqlite3.Connection, node_id: str, state: JsonDict
+    ) -> bool:
+        """Decide whether a heartbeat's device_state may overwrite the snapshot.
+
+        Multi-writer arbitration: a device_state envelope carries a
+        ``session_id`` and a monotonically increasing ``sequence``. The node
+        stores the cursor of the last accepted writer. A sample is accepted
+        only when it is newer than the cursor — a same-session duplicate or an
+        out-of-order sequence is ignored, and a new session whose first sample
+        predates the last accepted sample (an old process resuming) is ignored
+        too. Envelopes without a cursor (legacy clients) are always accepted.
+        Returns True to write, False to keep the current snapshot.
+        """
+        session_id = state.get("session_id")
+        sequence = state.get("sequence")
+        sampled_at = state.get("sampled_at")
+        if not isinstance(session_id, str) or not session_id:
+            return True
+        if not isinstance(sequence, int) or isinstance(sequence, bool):
+            return True
+        row = connection.execute(
+            "SELECT device_state_session_id, device_state_sequence, device_state_at "
+            "FROM nodes WHERE node_id = ?",
+            (node_id,),
+        ).fetchone()
+        prev_session = row["device_state_session_id"]
+        prev_sequence = row["device_state_sequence"]
+        prev_at = row["device_state_at"]
+        if prev_session is None:
+            return True
+        if session_id == prev_session:
+            if prev_sequence is not None and sequence <= prev_sequence:
+                return False
+            return True
+        # Different session. A process restart is the current writer, but a
+        # stale process resuming must not overwrite a fresher snapshot.
+        if (
+            isinstance(sampled_at, str)
+            and prev_at is not None
+            and _instant(sampled_at) < _instant(prev_at)
+        ):
+            return False
+        return True
+
     def heartbeat(self, node_id: str, payload: JsonDict, *, peer_ip: str | None = None) -> JsonDict:
         node_id = _identifier(node_id)
         data = _validated(NodeHeartbeat, payload).model_dump(mode="json")
@@ -357,15 +443,44 @@ class Coordinator:
         def action(connection: sqlite3.Connection, now: datetime) -> JsonDict:
             self._row(connection, "nodes", "node_id", node_id)
             self._reconcile(connection, now, allow_commits=False)
-            connection.execute(
-                "UPDATE nodes SET context_json = ?, last_seen_at = ? WHERE node_id = ?",
-                (_json(data["context"]), _timestamp(now), node_id),
-            )
+            incoming_state = data["context"].get("device_state")
+            accept = True
+            if isinstance(incoming_state, dict):
+                accept = self._accept_device_state(connection, node_id, incoming_state)
+            if accept:
+                connection.execute(
+                    "UPDATE nodes SET context_json = ?, last_seen_at = ? WHERE node_id = ?",
+                    (_json(data["context"]), _timestamp(now), node_id),
+                )
+                if isinstance(incoming_state, dict):
+                    self._record_device_state_cursor(connection, node_id, incoming_state)
+            else:
+                connection.execute(
+                    "UPDATE nodes SET last_seen_at = ? WHERE node_id = ?",
+                    (_timestamp(now), node_id),
+                )
             self.devices.record_native_ip(connection, node_id, now, peer_ip)
             self._reconcile(connection, now)
             return self._node(self._row(connection, "nodes", "node_id", node_id), now, connection)
 
         return self._write(action, reconcile_first=False)
+
+    def _record_device_state_cursor(
+        self, connection: sqlite3.Connection, node_id: str, state: JsonDict
+    ) -> None:
+        session_id = state.get("session_id")
+        sequence = state.get("sequence")
+        sampled_at = state.get("sampled_at")
+        connection.execute(
+            "UPDATE nodes SET device_state_session_id = ?, device_state_sequence = ?, "
+            "device_state_at = ? WHERE node_id = ?",
+            (
+                session_id if isinstance(session_id, str) and session_id else None,
+                sequence if isinstance(sequence, int) and not isinstance(sequence, bool) else None,
+                sampled_at if isinstance(sampled_at, str) else None,
+                node_id,
+            ),
+        )
 
     def graph(self) -> JsonDict:
         nodes = self.list_nodes()
@@ -746,6 +861,137 @@ class Coordinator:
 
         return self._write(action)
 
+    def follow_room(self, companion_id: str, payload: JsonDict) -> JsonDict:
+        """Authoritative single-party room migration.
+
+        The lifeform flows to whichever room had the latest activity. Unlike a
+        prepared transfer, no target acknowledgment is required: the runtime
+        moves the companion, releases the old lease, and bumps epoch/revision in
+        one commit. The abandoned room becomes ``room_state: "empty"`` but keeps
+        its capabilities and tools.
+        """
+        companion_id = _identifier(companion_id)
+        data = _validated(RoomFollow, payload).model_dump(mode="json")
+
+        def action(connection: sqlite3.Connection, now: datetime) -> JsonDict:
+            companion = self._companion(
+                self._row(connection, "companions", "companion_id", companion_id)
+            )
+            self._check_revision(companion, data["expected_revision"])
+            if companion["epoch"] >= MAX_VERSION or companion["revision"] >= MAX_VERSION:
+                raise DomainError(409, "version_exhausted", "The companion version cannot advance")
+            target = data["target_node_id"]
+            if companion["active_node_id"] == target:
+                # Already in the room: just refresh the lease and activity stamp.
+                expires_at = _timestamp(now + timedelta(seconds=self.lease_ttl_seconds))
+                connection.execute(
+                    "UPDATE companions SET lease_expires_at = ?, last_activity_node_id = ?, last_activity_at = ?, updated_at = ? WHERE companion_id = ?",
+                    (expires_at, target, _timestamp(now), _timestamp(now), companion_id),
+                )
+                result = self._companion(
+                    self._row(connection, "companions", "companion_id", companion_id)
+                )
+                self._emit(
+                    connection,
+                    now,
+                    "companion.room_visited",
+                    {"companion": result, "node_id": target},
+                    companion_id=companion_id,
+                    node_id=target,
+                )
+                return result
+            if self._pending(connection, companion_id) is not None:
+                # An explicit two-party transfer wins over a room-follow impulse.
+                raise DomainError(
+                    409,
+                    "transfer_in_progress",
+                    "A prepared transfer already exists; follow_room is suspended",
+                )
+            reason = self._travel_reason(connection, companion["active_node_id"], target, now)
+            if reason is not None:
+                raise DomainError(
+                    409, reason, "The target room must be online and provide an output capability"
+                )
+            expires_at = _timestamp(now + timedelta(seconds=self.lease_ttl_seconds))
+            connection.execute(
+                "UPDATE companions SET active_node_id = ?, epoch = epoch + 1, revision = revision + 1, lease_expires_at = ?, last_activity_node_id = ?, last_activity_at = ?, updated_at = ? WHERE companion_id = ?",
+                (
+                    target,
+                    expires_at,
+                    target,
+                    _timestamp(now),
+                    _timestamp(now),
+                    companion_id,
+                ),
+            )
+            result = self._companion(
+                self._row(connection, "companions", "companion_id", companion_id)
+            )
+            self._emit(
+                connection,
+                now,
+                "companion.room_followed",
+                {
+                    "companion": result,
+                    "from_node_id": companion["active_node_id"],
+                    "to_node_id": target,
+                    "reason": data["reason"],
+                },
+                companion_id=companion_id,
+                node_id=target,
+            )
+            return result
+
+        return self._write(action, operation="follow_room", subject=companion_id, command=data)
+
+    def record_room_activity(self, node_id: str, now: datetime) -> JsonDict | None:
+        """Auto-follow the room that just reported activity.
+
+        Returns the moved companion snapshot, or None when no companion is
+        affected. Called by observation / attention handlers; never raises for
+        ordinary races (offline target, pending transfer) so activity still
+        lands in the event stream.
+        """
+        if not self.auto_follow_rooms:
+            return None
+        with self.store.transaction() as connection:
+            rows = connection.execute(
+                "SELECT companion_id FROM companions WHERE active_node_id IS NOT NULL"
+            ).fetchall()
+        moved = None
+        for row in rows:
+            companion_id = row["companion_id"]
+            with self.store.transaction() as connection:
+                companion = self._companion(
+                    self._row(connection, "companions", "companion_id", companion_id)
+                )
+                if companion["active_node_id"] == node_id:
+                    continue
+                last_at = companion.get("last_activity_at")
+                if last_at is not None and now - _instant(last_at) < timedelta(
+                    seconds=self.auto_follow_quiet_seconds
+                ):
+                    continue
+            try:
+                self.follow_room(
+                    companion_id,
+                    {
+                        "command_id": "room-"
+                        + hashlib.sha256(
+                            (companion_id + node_id + _timestamp(now)).encode()
+                        ).hexdigest()[:24],
+                        "target_node_id": node_id,
+                        "expected_revision": companion["revision"],
+                        "reason": "room_activity",
+                    },
+                )
+                moved = companion
+            except DomainError:
+                # Offline room, pending transfer, or same room: a room-follow
+                # impulse must never break the observation that triggered it.
+                continue
+        return moved
+
     def observe(self, node_id: str, payload: JsonDict) -> JsonDict:
         node_id = _identifier(node_id)
         data = _validated(ObservationCreate, payload).model_dump(mode="json")
@@ -763,7 +1009,7 @@ class Coordinator:
                         "user_initiated_required",
                         "Vision observations require an explicit user action",
                     )
-            return self._emit(
+            emitted = self._emit(
                 connection,
                 now,
                 "node.observation",
@@ -774,8 +1020,16 @@ class Coordinator:
                 },
                 node_id=node_id,
             )
+            return emitted
 
-        return self._write(action, operation="observe", subject=node_id, command=data)
+        result = self._write(action, operation="observe", subject=node_id, command=data)
+        # A user-initiated observation is room activity: the lifeform follows it.
+        if data.get("user_initiated") and self.auto_follow_rooms:
+            try:
+                self.record_room_activity(node_id, self._now())
+            except Exception:
+                pass
+        return result
 
     def events(
         self, after_sequence: int = 0, node_id: str | None = None, limit: int = 100

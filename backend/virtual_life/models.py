@@ -182,3 +182,20 @@ class ObservationCreate(RequestModel):
     @classmethod
     def validate_data(cls, value: JsonObject) -> JsonObject:
         return bounded_json(value)
+
+
+class RoomFollow(RequestModel):
+    """Authoritative single-party room migration.
+
+    Unlike a prepared transfer (a two-party handshake for native renderers),
+    follow_room is the "the lifeform flows to whichever room had the latest
+    activity" path: the runtime moves the companion and releases the old lease
+    in one commit, with no target acknowledgment required.
+    """
+
+    command_id: Identifier
+    target_node_id: Identifier
+    expected_revision: Version
+    reason: Annotated[
+        str, StringConstraints(strip_whitespace=True, min_length=1, max_length=512)
+    ] = "room_activity"

@@ -29,6 +29,7 @@ class NodeSnapshot(ResponseModel):
     kind: Literal["desktop", "android", "web", "other"]
     capabilities: list[str]
     online: bool
+    room_state: Literal["occupied", "empty"] = "empty"
     context: dict[str, Any]
     created_at: datetime
     last_seen_at: datetime
@@ -68,6 +69,8 @@ class CompanionSnapshot(ResponseModel):
     memory_refs: list[str]
     created_at: datetime
     updated_at: datetime
+    last_activity_node_id: str | None = None
+    last_activity_at: datetime | None = None
 
 
 class TransferSnapshot(ResponseModel):
@@ -277,5 +280,21 @@ class MemoryLogEntry(ResponseModel):
 
 class MemoryLogPage(ResponseModel):
     items: list[MemoryLogEntry]
+    next_sequence: int
+    has_more: bool
+
+
+class FlowLogEntry(ResponseModel):
+    sequence: int
+    timestamp: str
+    level: str
+    logger: str
+    request_id: str | None
+    message: str
+    line: str
+
+
+class FlowLogPage(ResponseModel):
+    items: list[FlowLogEntry]
     next_sequence: int
     has_more: bool

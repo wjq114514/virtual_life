@@ -740,3 +740,69 @@ def test_missing_resources_and_event_validation(runtime):
         {"limit": True},
     ):
         assert_error("validation_error", runtime.events, **kwargs)
+
+
+def test_device_state_session_sequence_arbitration(runtime, clock):
+    """A stale session or an out-of-order sample must not overwrite a fresher device_state."""
+    register(runtime, "nas", ["device.state.report"])
+
+    def state(session, sequence, cpu, sampled_at=None):
+        return {
+            "context": {
+                "device_state": {
+                    "schema_version": "1.0",
+                    "subject_node_id": "nas",
+                    "observer_node_id": "nas",
+                    "session_id": session,
+                    "sequence": sequence,
+                    "sampled_at": sampled_at or clock.value.isoformat().replace("+00:00", "Z"),
+                    "ttl_seconds": 60,
+                    "source": {
+                        "adapter": "linux_proc",
+                        "scope": "runtime_environment",
+                        "quality": "ok",
+                        "errors": [],
+                    },
+                    "reachability": {"status": "reachable", "latency_ms": 1.0, "http_status": None},
+                    "health": {"status": "unknown", "reason": "not_evaluated"},
+                    "metrics": {"cpu_usage_percent": cpu},
+                    "operation": None,
+                }
+            }
+        }
+
+    # First sample establishes the cursor.
+    runtime.heartbeat("nas", state("s1", 1, 10.0))
+    assert (
+        runtime.get_node("nas")["context"]["device_state"]["metrics"]["cpu_usage_percent"] == 10.0
+    )
+    # Same session, higher sequence accepted.
+    runtime.heartbeat("nas", state("s1", 2, 20.0))
+    assert (
+        runtime.get_node("nas")["context"]["device_state"]["metrics"]["cpu_usage_percent"] == 20.0
+    )
+    # Same session, duplicate/out-of-order sequence ignored.
+    runtime.heartbeat("nas", state("s1", 2, 99.0))
+    runtime.heartbeat("nas", state("s1", 1, 88.0))
+    assert (
+        runtime.get_node("nas")["context"]["device_state"]["metrics"]["cpu_usage_percent"] == 20.0
+    )
+    # A new session with a fresher sample wins.
+    clock.advance(1)
+    runtime.heartbeat("nas", state("s2", 1, 30.0))
+    assert (
+        runtime.get_node("nas")["context"]["device_state"]["metrics"]["cpu_usage_percent"] == 30.0
+    )
+    # A stale process resuming (old session, older sampled_at) is ignored.
+    stale_at = (clock.value - timedelta(seconds=5)).isoformat().replace("+00:00", "Z")
+    runtime.heartbeat("nas", state("s1", 3, 40.0, sampled_at=stale_at))
+    assert (
+        runtime.get_node("nas")["context"]["device_state"]["metrics"]["cpu_usage_percent"] == 30.0
+    )
+    # Legacy envelope without session/sequence is still accepted.
+    runtime.heartbeat(
+        "nas", {"context": {"device_state": {"metrics": {"cpu_usage_percent": 50.0}}}}
+    )
+    assert (
+        runtime.get_node("nas")["context"]["device_state"]["metrics"]["cpu_usage_percent"] == 50.0
+    )

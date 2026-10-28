@@ -310,7 +310,8 @@ def test_legacy_native_and_web_rows_keep_stable_ids_without_merging(runtime, clo
     timestamp = clock.value.isoformat()
     with runtime.store.transaction(write=True) as connection:
         connection.execute(
-            "INSERT INTO nodes VALUES ('old-web','Old web','web','[\"text.display\"]','{}',?,?)",
+            "INSERT INTO nodes(node_id,label,kind,capabilities_json,context_json,created_at,last_seen_at)"
+            " VALUES ('old-web','Old web','web','[\"text.display\"]','{}',?,?)",
             (timestamp, timestamp),
         )
     legacy = register(runtime, "old-web", kind="web", peer_ip="10.1.1.1")
