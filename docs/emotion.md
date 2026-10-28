@@ -6,7 +6,7 @@
 
 有效用户对话先校验节点、epoch、revision、输出租约、节点能力和迁移状态，再将命令占用、`companion.dialogue_received` 事件及情感经历原子提交。重复命令不重复触发。模型失败仍保留已接受的用户事件；失败、静默和丢弃的回复不消耗模拟精力。[自触发](proactivity.md) 使用独立事件，不制造用户消息或情感刺激。
 
-`emotion_appraisal.py` 将明确线索先映射为评价向量，再投影为生命体的情绪增量。当前支持感谢、安静请求、探索，以及“我最近有点难过”“我现在非常累”等时间和程度变体。程度系数为有点/有一点 0.6、很/无程度词 1、非常/十分 1.25、特别 1.4。它们是可替换的工程参数；对难过表达产生轻度关切，不直接复制用户状态。
+`emotion_appraisal.py` 将明确线索先映射为评价向量，再投影为生命体的情绪增量。当前支持感谢、安静请求、探索、难过、疲惫，以及“我最近有点难过”“我现在非常累”等时间和程度变体；新增娱乐（哈哈/笑死/太好笑）、兴奋（太棒了/好期待/我激动坏了）、惊讶（竟然/没想到/哇）、同情（好可怜/太心疼）、烦躁（气死我了/真无语）与自豪（我做到了/看我的厉害）六类锚定反应。程度系数为有点/有一点 0.6、很/无程度词 1、非常/十分 1.25、特别 1.4。它们是可替换的工程参数；对难过表达产生轻度关切，不直接复制用户状态。
 
 仍使用有明确范围的整句模板：否定、引用、转述、假设、反问、讽刺和复杂多分句通常保持中性，不按关键词翻转情绪。探索允许限定长度的后缀，显式引用、假设或讽刺标记使其回到中性。安静请求优先。此实现没有训练语言分类器，也没有导入情绪词库数据。
 
@@ -30,7 +30,7 @@ factor[axis] = 2^(-max(0, elapsed_seconds) / half_life[axis])
 effective[axis] = clamp(baseline[axis] + sum(valid_delta[axis] * factor[axis]))
 ```
 
-愉悦度范围 -1..1，唤醒度和控制感范围 0..1。精力与社交精力独立，成功回复按实际字符长度有限消耗；资源共享一个可单独设置的半衰期。整个经历仍以消息接受时间为恢复锚点。离线、断网和迁移没有情感惩罚。
+愉悦度范围 -1..1，唤醒度和控制感范围 0..1。精力与社交精力独立，成功回复按实际字符长度有限消耗；资源共享一个可单独设置的半衰期。负面情绪（关切/心疼/烦躁）可配置更慢的 `negative_half_life_seconds`，反映负性偏差——坏事比好事残留更久（Baumeister、Bratslavsky、Finkenauer 与 Vohs 2001 的《Bad Is Stronger Than Good》；Rozin & Royzman 2001 的负性偏差解剖）；显式配置的单轴半衰期仍优先于负面调整。整个经历仍以消息接受时间为恢复锚点。离线、断网和迁移没有情感惩罚。
 
 读取、提示预览和回执查询不新增刺激、不改变 revision。最多处理最近 `candidate_limit` 项，超出返回 `truncated=true`。超过最长已配置半衰期的 24 倍后不再计入增量，历史仍可分页查看；这是有界近似。最近仍有明确影响的经历决定表达标签，数值保留其他经历的影响。安静请求沿用共享 `half_life_seconds` 的一个半衰期有效期，不随单轴配置改变；其回复建议限制为一句，不修改 interaction_mode，也不硬裁剪模型文本。
 
@@ -91,6 +91,8 @@ enabled = true
 half_life_seconds = 1200
 candidate_limit = 256
 resonance_strength = 0.2
+# 负面情绪（关切/心疼/烦躁）更慢衰减，反映负性偏差；不填则与正面同用共享值。
+# negative_half_life_seconds = 2400
 # 可选覆盖；不填沿用 half_life_seconds。
 # valence_half_life_seconds = 1800
 # arousal_half_life_seconds = 600
@@ -98,11 +100,15 @@ resonance_strength = 0.2
 # resource_half_life_seconds = 2400
 ```
 
-环境变量 `VIRTUAL_LIFE_EMOTION_<字段大写>` 覆盖文件设置。四个可选半衰期的空环境变量恢复 None，继而回退共享半衰期；TOML 省略该字段即可。半衰期均为 60..7200 秒，候选上限 1..2048，共鸣系数 0..0.3。默认各轴保持旧值，没有静默改变恢复速度。enabled=false 后维持原人格与手动状态，不新增自动反应，历史仍可读取。配置修改需重启。
+环境变量 `VIRTUAL_LIFE_EMOTION_<字段大写>` 覆盖文件设置。四个可选半衰期及 `negative_half_life_seconds` 的空环境变量恢复 None，继而回退共享半衰期；TOML 省略该字段即可。半衰期均为 60..7200 秒，候选上限 1..2048，共鸣系数 0..0.3。默认各轴保持旧值，没有静默改变恢复速度。enabled=false 后维持原人格与手动状态，不新增自动反应，历史仍可读取。配置修改需重启。
 
 ## 调研与取舍
 
 参考已有[演进草案](ambient-signals-and-emotion.md)的六维评价、受控重评级与分维度动力学建议；本轮补查了[评价过程作者资料](https://biblio.ugent.be/publication/4316089)、[EMA 作者论文目录](https://www.ccs.neu.edu/home/marsella/publications/abstracts/MarsellaCSR09-abstract.html)和 [Chinese EmoBank 原仓库](https://github.com/NYCU-NLP/Chinese-EmoBank)。前者支持将线索解释与情感结果分开，中文资源明确区分程度、否定和情态，为规则边界提供参考。
+
+本轮情绪丰富化与负性偏差依据心理学文献校验：连续三维 Affect{valence,arousal,control} 对应 Mehrabian 的 [PAD/Pleasure-Arousal-Dominance 模型](https://echodefence.com/methodology/vad-emotion-model)（[Russell 圆周模型](https://echodepthinsight.com/insights/valence-arousal-dominance)仅二维、缺支配/控制感维度，而支配感恰是区分关键状态所需；PAD 是测量框架而非评价理论）；衰减回基线用半衰期指数符合 [WASABI 架构](https://cs.uwaterloo.ca/~jhoey/teaching/cs886-affect/papers/WASABIAAMAS2010.pdf)（Becker-Asano & Wachsmuth 2010，PAD 空间 + 可配置每情绪指数衰减 + 分类为离散情绪）与 EMA 的通用做法；评价用简化 [OCC 模型](https://psychologyfanatic.com/ortony-clore-and-collins-occ-model-of-emotion)（Ortony, Clore & Collins 1988，22 类情绪由情境而非体表反应区分，是主流认知评价理论）。负面更慢衰减取自负性偏差：Baumeister、Bratslavsky、Finkenauer 与 Vohs（2001）的《[Bad Is Stronger Than Good](https://journals.sagepub.com/doi/10.1037/1089-2680.5.4.323)》系统综述（负面事件/情绪/信息比同量级正面更强、更久、更细），以及 [Rozin & Royzman（2001）的负性偏差解剖](https://yukaichou.com/behavioral-analysis/negativity-bias-rozin-royzman-bad-stronger-than-good)（负性更强、逼近时加速、主导混合、感知更细）。WASABI 本身允许每情绪配置指数衰减，但不对称的心理学根据主要来自负性偏差，而非 WASABI 内置默认。现有实现是简化 OCC + PAD 三维 + 半衰期衰减的合成体，架构上与主流情感计算代理同构，未引入未经心理学支持的自由参数。
+
+仍未采用完整 OCC（缺 novelty/goal-relevance/agency 归因细分，因此自豪/烦躁/愤怒区分仍靠规则锚定）、Kalman 参数估计、持续心境、长期关系演化或复杂语义理解。agency 归因与动态衰减（随强度变化）列为后续增强候选；表达效果仍需真实对话评估。
 
 草案中“方向澄清改变符号”没有直接采用：一次方向否认不足以支持相反体验，本阶段只撤去该解释。保留原始证据与独立修正也让后续校准可追溯。投影增益、程度系数和归因减半均是项目工程选择，未从论文或数据拟合。
 

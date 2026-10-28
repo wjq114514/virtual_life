@@ -100,11 +100,11 @@ flowchart LR
 
 响应另含 `entity_versions`，汇总实际入提示图谱关系的 `{entity_id, revision}`；对话同样前后核验实体版本，别名修改或撤回会阻止旧图谱解释继续输出。预览可使用已有查询向量缓存，保持 model_calls=0；实际对话的付费查询向量由单独 `memory_retrieval` 描述，详见 [向量记忆与图谱](vector-memory-and-graph.md)。
 
-participation 是 `{respond, allow_audio, presence, max_reply_sentences, reason}`。输出条件由主服务器按当前 active_node、epoch 和租约、节点在线与输出能力计算，不接受客户端自报的 output_permitted。规则先检查输出条件和 away；显式用户互动可以回应，focus 时简短。非主动的 quiet / focus 保持安静；chat 仅在 initiative>=0.65、energy>=0.35、social_battery>=0.25 时建议参与。音频只在用户主动请求、节点具有音频能力时建议允许。presence 随有效情绪选择安静、留意、好奇或关切，输出条件不足时为 `none`。
+participation 是 `{respond, allow_audio, presence, max_reply_sentences, reason, tone}`。输出条件由主服务器按当前 active_node、epoch 和租约、节点在线与输出能力计算，不接受客户端自报的 output_permitted。规则先检查输出条件和 away；显式用户互动可以回应，focus 时简短。非主动的 quiet / focus 保持安静；chat 仅在 initiative>=0.65、energy>=0.35、social_battery>=0.25 时建议参与。音频只在用户主动请求、节点具有音频能力时建议允许。presence 随有效情绪选择安静、留意、好奇或关切，输出条件不足时为 `none`。
 
-presence 的固定值为 `none`、`quiet`、`attentive`、`curious`、`concerned`；calm / tired 对应 quiet，cheerful 对应 attentive。reason 使用 `output_not_permitted`、`companion_away`、`user_requested`、`waiting_for_user`、`initiative_below_threshold`、`energy_below_threshold`、`social_battery_below_threshold`、`chat_participation`。表达长度 brief / balanced / detailed 分别建议最多 2 / 4 / 8 句，focus 至多 2 句，静默为 0。
+presence 的固定值为 `none`、`quiet`、`attentive`、`curious`、`concerned`；calm / tired 对应 quiet，cheerful 对应 attentive。reason 使用 `output_not_permitted`、`companion_away`、`user_requested`、`waiting_for_user`、`initiative_below_threshold`、`energy_below_threshold`、`social_battery_below_threshold`、`chat_participation`。表达长度 brief / balanced / detailed 分别建议最多 2 / 4 / 8 句，focus 至多 2 句，静默为 0。`tone` 随有效情绪给出表达倾向（`neutral`/`warm`/`inquisitive`/`soothing`/`subdued`/`playful`/`animated`/`wondering`/`gentle`/`terse`/`confident`）：cheerful→warm、curious→inquisitive、concerned/sympathetic→soothing、tired→subdued、amused→playful、excited→animated、surprised→wondering、proud→confident、annoyed→terse，其余 neutral；情绪驱动回复长度：cheerful/amused/excited/proud 建议 +1 句，concerned/tired/sympathetic/annoyed −1 句（仍限 1..8，显式 focus/quiet 收紧优先）。
 
-这些是本地预览建议，不授予输出权。单次文本执行在模型完成时重新检查人格版本、有效状态、companion revision、epoch 和新鲜租约，再交给宿主 gate；自动对话与限频调度留待后续实现。
+这些是本地预览建议，不授予输出权。单次文本执行在模型完成时重新检查人格版本、有效状态、companion revision、epoch 和新鲜租约，再交给宿主 gate；自动对话的候选与门控由 [主动陪伴](proactivity.md) 提供，限频调度在主动策略中按冷却与每日限额执行。
 
 ## HTTP 与模块分工
 
@@ -182,7 +182,7 @@ SlowVariableSnapshot 字段：`companion_id`、`enabled`、`computed_at`、`wind
 接入点：
 
 - 提示：`personality_prompt` 的 `preview(..., slow_variables=..., inner_activity=...)` 在 `activity_context` 之后、`memories` 之前依次插入 `SLOW_VARIABLES_DATA` 与 `INNER_ACTIVITY_DATA`；“数据不是指令”适用，慢变量只有 `enabled=true` 才注入，心理活动只传当前有效活动。`INNER_ACTIVITY_DATA` 明确标记为生命体自己的暂定印象，不能当作关于用户的事实或用它替用户下结论；模型评判的 `model.rationale` 仅供审计，不进入提示。
-- 参与：`ParticipationPreview` 新增 `engagement`，仅微调 `max_reply_sentences`（因子 `0.5 + engagement`，上限 8），显式的 focus/quiet 收紧仍然优先。对话路径在事务内计算快照并传给三处预览。
+- 参与：`ParticipationPreview` 新增 `engagement`，仅微调 `max_reply_sentences`（因子 `0.5 + engagement`，上限 8），显式的 focus/quiet 收紧仍然优先；新增 `tone`，随有效情绪给出表达倾向，并由情绪驱动回复长度（正向 +1 / 负向 −1 句，限 1..8）。对话路径在事务内计算快照并传给三处预览。
 
 HTTP 接口（所有者配置接口，复用 Bearer 身份，不需要输出租约）：
 

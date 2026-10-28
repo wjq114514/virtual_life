@@ -50,8 +50,6 @@ uv run pytest -q
 uv run python examples/attention_live_test.py
 # 下条会读取配置的模型凭据，发出两次真实模型请求：
 uv run --with playwright python examples/attention_live_test.py --real-model
-uv run --with playwright python examples/webui_attention_smoke.py --help
-uv run --with playwright python examples/webui_stream_smoke.py --help
 clients/android-node/build-sdk.sh assemble exampleClasses
 uv run python clients/system-node/build.py
 ```

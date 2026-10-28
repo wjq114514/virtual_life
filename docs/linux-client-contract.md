@@ -143,7 +143,7 @@ vl daemon run | version
 
 选中伙伴有三条路：`vl companion list` 看列表与当前选中项（daemon 首次 list 会自动选中第一个）；`vl companion select <id>` 只改选中、不接入；`vl chat <id>` / `vl connect <id>` 是带接入的选择。`connect` 之前必须有已 attach 的 renderer，否则返回 `renderer_required`（退出码 5），TUI 就是那个 renderer。
 
-`vl setup` 对应 `packaging/install.py`（用户级安装，可 `--dry-run`、`--skip-package`、`--no-systemd`）。`vl chat`/`vl tui` 拥有自己的事件循环，不能在 daemon 进程里启动。
+`vl setup` 是完整安装与更新入口：先从服务端（或 `--dist-url`/`--wheel`）拉取客户端包并校验 sha256，再写 config、凭据与桌面资产。可 `--dry-run`、`--no-systemd`、`--clobber`、`--json`。它与 `packaging/install.py` 共用 `virtual_life_linux.installer`，因此不再要求本机有源码树。凭据只从 `--token`、`--token-file`、`VIRTUAL_LIFE_TOKEN` 或既有 0600 凭据文件读取，交互终端才提示输入，输入不回显；任何情况下不把 token 打印或写入日志。`vl chat`/`vl tui` 拥有自己的事件循环，不能在 daemon 进程里启动。
 
 `vl connect` 非交互且无已准备 renderer 时返回 `renderer_required`。
 
@@ -172,3 +172,60 @@ daemon 注册 `kind=desktop`。能力计算：默认 `device.state.report`；适
 - `vl doctor --json` 报告完整结构：客户端版本、配置路径/URL/node、凭据是否可读、服务端可达性与协议版本、daemon 聚合状态、renderer/presentation/lease、注意力与 voice 状态、最后错误。不带 `--json` 时输出紧凑摘要（只含布尔与标识，不含正文）。探测服务端只用 6 秒超时的只读请求，不注册节点、不写任何数据。秘密、命令行、窗口标题、聊天正文不进入诊断。
 - 遥测采集为小范围抽取的纯标准库模块，构建时复制白名单并记录来源哈希。
 - wheel 把 `integrations/` 与 `config.example.toml` 打成包数据；`packaging/build.py` 校验缺失资产并失败，`packaging/install.py` 先读源码树、再读已安装包数据，因此从 wheel 安装后仍可 `--skip-package` 补装资产。
+
+## 10. 客户端分发通道
+
+`vl setup` 的包来源是服务端的分发端点（见 [统一配置](configuration.md) 的 `[dist]`）：
+
+| 端点 | 用途 |
+| --- | --- |
+| `GET /v1/dist/manifest.json` | 按版本升序返回包清单，含 `default_version` |
+| `GET /v1/dist/packages/{wheel}` | 下载指定 wheel |
+| `POST /v1/dist/packages` | 上传 wheel，额外要求 `[dist] upload_secret` |
+
+清单 schema（`dist_version = "1.0"`）：
+
+```json
+{
+  "dist_version": "1.0",
+  "default_version": "0.1.1",
+  "packages": [
+    {
+      "version": "0.1.1",
+      "wheel": "virtual_life_linux-0.1.1-py3-none-any.whl",
+      "sha256": "64 hex",
+      "size_bytes": 77276,
+      "released_at": "2026-10-24T14:13:30Z",
+      "requires_python": ">=3.12",
+      "runtime_version": null
+    }
+  ]
+}
+```
+
+客户端行为：`--version` 省略或为 `latest` 时取最高版本；指定版本必须精确匹配，否则列出可用版本并失败。下载完成后本地重算 sha256 与清单比对，不匹配则删除临时文件并中止安装，绝不安装校验失败的包。文件名不匹配 `virtual_life_linux-<版本>-py3-none-any.whl` 一律拒绝。
+
+`--dist-url` 允许使用 `file://` 或无鉴权的静态 HTTP 位置，布局为 `<root>/dist/manifest.json` 与 `<root>/dist/packages/{wheel}`，便于离线或自建仓库发布。安装逻辑（资产、config、凭据、systemd）全部在 `virtual_life_linux.installer` 内，`packaging/install.py` 只是薄壳，保证源码树与 wheel 两条路径行为一致。
+
+### 10.1 GitHub Releases 来源
+
+`--github owner/repo` 让 `vl setup` 从仓库的 releases 拉取，无需自建服务器。来源优先级：`--wheel` > `--github` > `--dist-url` > `--server`。
+
+| 选项 | 说明 |
+| --- | --- |
+| `--github owner/repo` | 仓库；也接受 `https://github.com/o/r`、`o/r.git`、`git@github.com:o/r.git` 等写法 |
+| `--github-token` | 私有仓库用；默认读 `GITHUB_TOKEN`。绝与 runtime token 混用，也不写入客户端配置 |
+| `--github-api` | API root，默认 `https://api.github.com`；可用 `VIRTUAL_LIFE_LINUX_GITHUB_API` 覆盖（GitHub Enterprise 与本地验证） |
+
+客户端用 `GET /repos/{owner}/{repo}/releases?per_page=50` 读取 release 列表，按 wheel 文件名匹配 `virtual_life_linux-<版本>-py3-none-any.whl`，版本从**文件名**取（不信任 tag），tag 的可选 `v` 前缀不影响匹配。下载 URL 直接取资产的 `browser_download_url`。
+
+**校验和规则（fail-closed）**。一个 wheel 只有在能拿到 sha256 时才可被安装，来源优先级：
+
+1. 同一 release 内的校验和资产：`SHA256SUMS` / `sha256sums.txt` / `checksums.txt` / `sums` / `sha256.txt` / `*.sha256`，按 `sha256  文件名` 逐行解析（容忍 `*` 二进制标记）；
+2. 资产的 `digest` 字段（`SHA256:<hex>` 或裸 hex）。
+
+一个 release 完全没发校验和时，客户端报 `no published checksums` 并要求补发；单个 wheel 缺校验和时不会进 `latest`（`latest` 从不指向无法验证的版本），但仍在 `packages` 中列出，显式 `--version` 选中后在下载前被拒绝安装。校验和不匹配同样中止，且删除已下载的临时文件。
+
+`DistPackage.download_url` 只由 GitHub 适配器填充，服务端 manifest 的 `from_json()` 从不读这个键，因此服务端无法把下载（以及 runtime token）重定向到第三方主机。GitHub token 只发往 `--github-api` 指向的主机。下载产生的临时目录在安装步骤结束后清理，无论成功或失败。
+
+发布端：`packaging/build.py` 在 `dist/` 下生成 `SHA256SUMS`（含 wheel 与 sdist），运维者只需上传 wheel + `SHA256SUMS` 两个资产。

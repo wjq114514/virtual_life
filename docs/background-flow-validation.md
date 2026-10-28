@@ -38,9 +38,7 @@
 ```sh
 uv run pytest -q
 uv run python examples/runtime_live_test.py
-uv run --with playwright python examples/webui_proactivity_smoke.py --help
 uv run --with playwright python examples/webui_smoke.py --help
-uv run --with playwright python examples/webui_stream_smoke.py --help
 clients/android-node/build-sdk.sh assemble exampleClasses
 ```
 

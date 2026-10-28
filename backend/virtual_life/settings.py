@@ -53,9 +53,12 @@ _CONFIG_SECTIONS = {
         "node_ttl_seconds": "node_ttl_seconds",
         "lease_ttl_seconds": "lease_ttl_seconds",
         "transfer_ttl_seconds": "transfer_ttl_seconds",
+        "auto_follow_rooms": "auto_follow_rooms",
+        "auto_follow_quiet_seconds": "auto_follow_quiet_seconds",
         "event_poll_seconds": "event_poll_seconds",
         "reconcile_seconds": "reconcile_seconds",
         "websocket_auth_timeout_seconds": "websocket_auth_timeout_seconds",
+        "webui_session_days": "webui_session_days",
     },
     "model": {
         "base_url": "model_base_url",
@@ -187,6 +190,7 @@ _INTEGER_FIELDS = (
     "node_ttl_seconds",
     "lease_ttl_seconds",
     "transfer_ttl_seconds",
+    "auto_follow_quiet_seconds",
     "auto_memory_batch_size",
     "auto_memory_output_tokens",
     "server_port",
@@ -202,6 +206,7 @@ _INTEGER_FIELDS = (
     "log_file_backup_count",
     "dist_max_bytes",
     "dist_max_packages",
+    "webui_session_days",
 )
 _NUMBER_FIELDS = (
     "proactivity_poll_seconds",
@@ -540,9 +545,15 @@ class Settings:
     node_ttl_seconds: int = 60
     lease_ttl_seconds: int = 10
     transfer_ttl_seconds: int = 30
+    # Node rooms: the lifeform follows the room that most recently reported
+    # activity. The abandoned room stays "empty" but keeps its tools.
+    auto_follow_rooms: bool = True
+    auto_follow_quiet_seconds: int = 15
     event_poll_seconds: float = 0.2
     reconcile_seconds: float = 0.5
     websocket_auth_timeout_seconds: float = 5.0
+    # WebUI session cookie lifetime in days; 0 refuses to remember the token.
+    webui_session_days: int = 30
     model_base_url: str = ""
     model_name: str = ""
     model_api_key: str = field(default="", repr=False)
@@ -808,6 +819,13 @@ class Settings:
         ):
             if not _finite_positive(getattr(self, setting_name)):
                 raise ValueError(f"{setting_name} must be finite and positive")
+        if (
+            not _finite_positive(self.auto_follow_quiet_seconds)
+            or self.auto_follow_quiet_seconds < 0
+        ):
+            raise ValueError("auto_follow_quiet_seconds must be finite and nonnegative")
+        if not 0 <= self.webui_session_days <= 3650:
+            raise ValueError("runtime.webui_session_days must be between 0 and 3650")
         base_url, model_name = self.model_base_url.strip(), self.model_name.strip()
         if bool(base_url) != bool(model_name):
             raise ValueError(
@@ -917,6 +935,7 @@ class Settings:
                                 "embedding_dialogue_recall",
                                 "embedding_local",
                                 "rerank_enabled",
+                                "auto_follow_rooms",
                             )
                             else dict
                         )
@@ -1008,16 +1027,14 @@ class Settings:
             values["log_file_path"] = str(
                 log_path if log_path.is_absolute() else path.parent / log_path
             )
-        if "dist" in values and "VIRTUAL_LIFE_DIST_DIRECTORY" not in os.environ:
-            dist_values = values["dist"]
-            if not isinstance(dist_values, dict):
-                raise ValueError("dist must be a table")
-            directory = dist_values.get("directory")
-            if isinstance(directory, str) and directory.strip():
-                resource = Path(directory).expanduser()
-                dist_values["directory"] = str(
-                    resource if resource.is_absolute() else path.parent / resource
-                )
+        if "dist_directory" in values and "VIRTUAL_LIFE_DIST_DIRECTORY" not in os.environ:
+            directory = values["dist_directory"]
+            if not isinstance(directory, str) or not directory.strip():
+                raise ValueError("dist.directory must name a directory")
+            resource = Path(directory).expanduser()
+            values["dist_directory"] = str(
+                resource if resource.is_absolute() else path.parent / resource
+            )
         if (
             "scene_classifier" in values
             and "VIRTUAL_LIFE_SCENE_CLASSIFIER_ARTIFACT" not in os.environ

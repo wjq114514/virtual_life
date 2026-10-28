@@ -46,7 +46,6 @@ Linux 修复后最终包 SHA256：`9e02c0832bd1e6e0dbea289a8aa690e1a9f6135c53800
 ```sh
 uv run python examples/runtime_live_test.py
 uv run --with playwright python examples/webui_smoke.py --help
-uv run --with playwright python examples/webui_stream_smoke.py --help
 ```
 
 真实 SSH 验收需要自行准备全新的、可丢弃的目标机；脚本会安装服务，不能用于已有业务安装。完整参数见：

@@ -175,6 +175,34 @@ revision/CAS。打开策略不等于获得输出权限；它不能越过节点�
 模式或未知注意力。状态区显示的是宿主建议与累计专注段，不反向伪造 focused 样本。
 主动文字采用普通文本呈现，不把模型输出当成 HTML、脚本或用户发言。
 
+## DSH 投递（2026-10-28 接线）
+
+DSH（DeepSeek Harness）侧通过 `dsh/virtual-life-proactivity/` bundle 消费同一输出通道：
+轮询 `/v1/companions/{id}/proactivity/output`（`node_id/access_id/epoch/after_sequence`），
+把每个未投递的 `item.assistant_message` 用 `ctx.schedule.create` 投成独立 turn，
+并维护 delivered 游标。插件提供 `virtual_life_proactivity_status` / `_deliver` 两个工具。
+
+```yaml
+- insert:
+    - id: virtual-life-proactivity
+      name: '@virtuallife/dsh-virtual-life-proactivity'
+      config:
+        baseUrl: http://127.0.0.1:8038
+        token: local-dev-token
+        keepNodeAlive: true
+        poller: { enabled: true, intervalMs: 6000, maxPerPoll: 5 }
+        delivery: { title: 虚拟伙伴主动参与, promptPrefix: 虚拟伙伴主动想说话：, delaySeconds: 1 }
+        sessions:
+          - sessionId: session-...
+            companionId: proact-demo
+            nodeId: proact-node
+            accessId: proact-access-3
+```
+
+边界：Web access 有 TTL，过期后 poll 返回 `node_access_expired`，需重新 `POST /v1/nodes/access/web`
+并更新 `accessId`。当前投递语义是把运行时生成的台词塞进 prompt（DSH 会再生成一句）；
+设计上已规划改为"冲动投递"（见 [dsh-fusion-plan.md](dsh-fusion-plan.md) §6.3），P1 两段式回合落地后处理。
+
 `GET /v1/companions/{id}/proactivity/output` 必须提供 `node_id/access_id/epoch`，
 可选 `after_sequence`。响应为 `ProactivityOutputPage`：
 

@@ -29,9 +29,15 @@ api_token = "local-dev-token"
 node_ttl_seconds = 60
 lease_ttl_seconds = 10
 transfer_ttl_seconds = 30
+# 节点=房间：生命体自动流向最新有动静的房间；空闲超过该秒数后不再被同一个房间的
+# 活动吸引（抑制重复流转）。原房间标记 empty 但保留工具。
+auto_follow_rooms = true
+auto_follow_quiet_seconds = 15
 event_poll_seconds = 0.2
 reconcile_seconds = 0.5
 websocket_auth_timeout_seconds = 5.0
+# WebUI 会话 cookie 保存天数；0 表示永不记住令牌，每次打开页面都要输入。
+webui_session_days = 30
 
 [model]
 # base_url 与 name 必须同时填写或同时留空。
@@ -213,6 +219,9 @@ engagement_max = 0.8
 # 本地规则与记忆共鸣，不增加模型调用。修改后重启生效。
 enabled = true
 half_life_seconds = 1200
+# 负面情绪（关切/心疼/烦躁）比正面消退更慢，反映负性偏差；
+# 不填则负面与正面同用 half_life_seconds。范围 60..7200 秒。
+# negative_half_life_seconds = 2400
 # 各维度不填则沿用 half_life_seconds；范围均为 60..7200 秒。
 # valence_half_life_seconds = 1800
 # arousal_half_life_seconds = 600
@@ -358,3 +367,14 @@ max_segment_audio_seconds = 10.0
 audio_ttl_seconds = 60
 max_pending_segments = 4
 max_buffered_playback_seconds = 8.0
+
+# Linux 桌面客户端分发通道，供 `vl setup` 拉取最新版本。
+# 产物是运维者自行构建并上传的 wheel；运行时不生成、不校验其内容。
+# 相对路径以本配置文件所在目录为基准。
+[dist]
+directory = ".data/dist"
+# 上传专用密钥。留空时上传接口返回 503，下载不受影响。
+# 下载只需普通 api_token；上传额外要求此密钥，避免泄漏的 token 替换后续下载的客户端。
+# upload_secret = ""
+max_bytes = 67108864
+max_packages = 25

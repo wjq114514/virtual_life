@@ -29,6 +29,68 @@
         }
       }
     },
+    "/v1/session": {
+      "post": {
+        "tags": [
+          "runtime"
+        ],
+        "summary": "Create Webui Session",
+        "description": "Remember the administrative token in an HttpOnly session cookie.",
+        "operationId": "create_webui_session_v1_session_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WebUISessionCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WebUISessionStatus"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "runtime"
+        ],
+        "summary": "Delete Webui Session",
+        "description": "Forget the token for this browser.",
+        "operationId": "delete_webui_session_v1_session_delete",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WebUISessionStatus"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/nodes/{node_id}/voice/sessions": {
       "post": {
         "tags": [
@@ -689,6 +751,123 @@
             }
           }
         }
+      }
+    },
+    "/v1/dist/manifest.json": {
+      "get": {
+        "tags": [
+          "distribution"
+        ],
+        "summary": "Manifest",
+        "operationId": "manifest_v1_dist_manifest_json_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DistManifest"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      }
+    },
+    "/v1/dist/packages/{filename}": {
+      "get": {
+        "tags": [
+          "distribution"
+        ],
+        "summary": "Download",
+        "operationId": "download_v1_dist_packages__filename__get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "filename",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Filename"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/dist/packages": {
+      "post": {
+        "tags": [
+          "distribution"
+        ],
+        "summary": "Upload",
+        "operationId": "upload_v1_dist_packages_post",
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_upload_v1_dist_packages_post"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DistPackage"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
       }
     },
     "/v1/capabilities": {
@@ -4581,6 +4760,73 @@
         }
       }
     },
+    "/v1/companions/{companion_id}/dialogue/{command_id}/commit": {
+      "post": {
+        "tags": [
+          "dialogue"
+        ],
+        "summary": "Commit Dialogue",
+        "description": "Commit an externally generated reply to a turn parked by the runtime.\n\n`generator: \"external\"` on the dialogue route returns the assembled\nprompt without calling a model; this route writes the reply back under\nthe same context, reference, emotion, and memory gates.",
+        "operationId": "commit_dialogue_v1_companions__companion_id__dialogue__command_id__commit_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "companion_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Companion Id"
+            }
+          },
+          {
+            "name": "command_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Command Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DialogueCommitRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DialogueResult"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/companions/{companion_id}/transfers": {
       "post": {
         "tags": [
@@ -4772,6 +5018,64 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/TransferSnapshot"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/companions/{companion_id}/follow": {
+      "post": {
+        "tags": [
+          "travel"
+        ],
+        "summary": "Follow Room",
+        "description": "Move the lifeform to the room that just reported activity.\n\nSingle-party authoritative migration: no target handshake is required.\nThe abandoned room becomes `room_state: \"empty\"` but keeps its tools.",
+        "operationId": "follow_room_v1_companions__companion_id__follow_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "companion_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Companion Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RoomFollow"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CompanionSnapshot"
                 }
               }
             }
@@ -6160,6 +6464,60 @@
         }
       }
     },
+    "/v1/companions/{companion_id}/memory": {
+      "delete": {
+        "tags": [
+          "memory"
+        ],
+        "summary": "Erase Companion Memory",
+        "operationId": "erase_companion_memory_v1_companions__companion_id__memory_delete",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "companion_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Companion Id"
+            }
+          },
+          {
+            "name": "command_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Command Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/memory/policy": {
       "get": {
         "tags": [
@@ -6528,6 +6886,25 @@
         ],
         "title": "AttentionSnapshot"
       },
+      "Body_upload_v1_dist_packages_post": {
+        "properties": {
+          "upload_secret": {
+            "type": "string",
+            "title": "Upload Secret"
+          },
+          "file": {
+            "type": "string",
+            "contentMediaType": "application/octet-stream",
+            "title": "File"
+          }
+        },
+        "type": "object",
+        "required": [
+          "upload_secret",
+          "file"
+        ],
+        "title": "Body_upload_v1_dist_packages_post"
+      },
       "ClientFeatures": {
         "properties": {
           "schema_version": {
@@ -6748,6 +7125,29 @@
             "type": "string",
             "format": "date-time",
             "title": "Updated At"
+          },
+          "last_activity_node_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Activity Node Id"
+          },
+          "last_activity_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Activity At"
           }
         },
         "additionalProperties": true,
@@ -6945,6 +7345,54 @@
         "type": "object",
         "title": "DeviceIdentity"
       },
+      "DialogueCommitRequest": {
+        "properties": {
+          "assistant_message": {
+            "type": "string",
+            "maxLength": 65536,
+            "minLength": 1,
+            "title": "Assistant Message"
+          },
+          "model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model"
+          },
+          "usage": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DialogueUsage"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "tool_trace": {
+            "items": {
+              "additionalProperties": {
+                "$ref": "#/components/schemas/JsonValue"
+              },
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Tool Trace"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "assistant_message"
+        ],
+        "title": "DialogueCommitRequest",
+        "description": "An externally generated reply, committed under the parked turn's gates."
+      },
       "DialogueHistoryItem": {
         "properties": {
           "event_id": {
@@ -7122,6 +7570,15 @@
             "title": "Max Output Tokens",
             "default": 512
           },
+          "generator": {
+            "type": "string",
+            "enum": [
+              "internal",
+              "external"
+            ],
+            "title": "Generator",
+            "default": "internal"
+          },
           "access_id": {
             "anyOf": [
               {
@@ -7179,7 +7636,8 @@
             "enum": [
               "completed",
               "silent",
-              "discarded"
+              "discarded",
+              "awaiting_generation"
             ],
             "title": "Status"
           },
@@ -7341,6 +7799,85 @@
         ],
         "title": "DialogueUsage"
       },
+      "DistManifest": {
+        "properties": {
+          "dist_version": {
+            "type": "string",
+            "title": "Dist Version",
+            "default": "1.0"
+          },
+          "default_version": {
+            "type": "string",
+            "title": "Default Version"
+          },
+          "packages": {
+            "items": {
+              "$ref": "#/components/schemas/DistPackage"
+            },
+            "type": "array",
+            "title": "Packages"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "default_version",
+          "packages"
+        ],
+        "title": "DistManifest"
+      },
+      "DistPackage": {
+        "properties": {
+          "version": {
+            "type": "string",
+            "title": "Version"
+          },
+          "wheel": {
+            "type": "string",
+            "title": "Wheel"
+          },
+          "sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Sha256"
+          },
+          "size_bytes": {
+            "type": "integer",
+            "exclusiveMinimum": 0.0,
+            "title": "Size Bytes"
+          },
+          "released_at": {
+            "type": "string",
+            "title": "Released At"
+          },
+          "requires_python": {
+            "type": "string",
+            "title": "Requires Python",
+            "default": ">=3.12"
+          },
+          "runtime_version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Runtime Version"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "version",
+          "wheel",
+          "sha256",
+          "size_bytes",
+          "released_at"
+        ],
+        "title": "DistPackage"
+      },
       "EmotionCorrection": {
         "properties": {
           "command_id": {
@@ -7495,7 +8032,13 @@
               "joy",
               "concern",
               "curiosity",
-              "quiet"
+              "quiet",
+              "amusement",
+              "excitement",
+              "surprise",
+              "sympathy",
+              "annoyance",
+              "pride"
             ],
             "title": "Reaction"
           },
@@ -7712,7 +8255,13 @@
               "joy",
               "concern",
               "curiosity",
-              "quiet"
+              "quiet",
+              "amusement",
+              "excitement",
+              "surprise",
+              "sympathy",
+              "annoyance",
+              "pride"
             ],
             "title": "Reaction"
           },
@@ -10726,6 +11275,15 @@
             "type": "boolean",
             "title": "Online"
           },
+          "room_state": {
+            "type": "string",
+            "enum": [
+              "occupied",
+              "empty"
+            ],
+            "title": "Room State",
+            "default": "empty"
+          },
           "context": {
             "additionalProperties": true,
             "type": "object",
@@ -10976,6 +11534,24 @@
               "chat_participation"
             ],
             "title": "Reason"
+          },
+          "tone": {
+            "type": "string",
+            "enum": [
+              "neutral",
+              "warm",
+              "inquisitive",
+              "soothing",
+              "subdued",
+              "playful",
+              "animated",
+              "wondering",
+              "gentle",
+              "terse",
+              "confident"
+            ],
+            "title": "Tone",
+            "default": "neutral"
           }
         },
         "additionalProperties": false,
@@ -11913,7 +12489,13 @@
               "cheerful",
               "curious",
               "concerned",
-              "tired"
+              "tired",
+              "amused",
+              "excited",
+              "surprised",
+              "sympathetic",
+              "annoyed",
+              "proud"
             ],
             "title": "Mood",
             "default": "calm"
@@ -12800,6 +13382,44 @@
         "additionalProperties": true,
         "type": "object",
         "title": "RerankDiagnostics"
+      },
+      "RoomFollow": {
+        "properties": {
+          "command_id": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Command Id"
+          },
+          "target_node_id": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Target Node Id"
+          },
+          "expected_revision": {
+            "type": "integer",
+            "maximum": 9.223372036854776e+18,
+            "minimum": 0.0,
+            "title": "Expected Revision"
+          },
+          "reason": {
+            "type": "string",
+            "maxLength": 512,
+            "minLength": 1,
+            "title": "Reason",
+            "default": "room_activity"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "command_id",
+          "target_node_id",
+          "expected_revision"
+        ],
+        "title": "RoomFollow",
+        "description": "Authoritative single-party room migration.\n\nUnlike a prepared transfer (a two-party handshake for native renderers),\nfollow_room is the \"the lifeform flows to whichever room had the latest\nactivity\" path: the runtime moves the companion and releases the old lease\nin one commit, with no target acknowledgment required."
       },
       "SSHAccess": {
         "properties": {
@@ -16330,6 +16950,47 @@
           "resolution"
         ],
         "title": "WebAccessSnapshot"
+      },
+      "WebUISessionCreate": {
+        "properties": {
+          "token": {
+            "type": "string",
+            "maxLength": 512,
+            "minLength": 1,
+            "title": "Token"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "token"
+        ],
+        "title": "WebUISessionCreate"
+      },
+      "WebUISessionStatus": {
+        "properties": {
+          "active": {
+            "type": "boolean",
+            "title": "Active"
+          },
+          "expires_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expires At"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "active"
+        ],
+        "title": "WebUISessionStatus"
       },
       "_PreviewHistoryMessage": {
         "properties": {

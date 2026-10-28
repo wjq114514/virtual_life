@@ -63,7 +63,7 @@ uv run uvicorn virtual_life.main:app --env-file .env --host 127.0.0.1 --port 800
 | --- | --- |
 | `[server]` | 新启动入口的监听 host、port |
 | `[logging]` | 控制台/文件日志级别、轮转大小与保留数量、HTTP 访问日志 |
-| `[runtime]` | 数据库、API token、节点在线期限、输出租约、迁移期限、轮询与认证超时 |
+| `[runtime]` | 数据库、API token、节点在线期限、输出租约、迁移期限、房间自动跟随开关与安静窗口、轮询与认证超时、WebUI 会话期限 |
 | `[model]` | Chat Completions 根地址、模型名、密钥、HTTP 超时、额外参数 |
 | `[scene_classifier]` | 本地场景分类器模式（off/observe/route）、模型产物、推理后端、超时与标签到回复模型的映射 |
 | `[automatic_memory]` | 自动记忆开关、批次、最大等待、轮询、输出 token 上限 |
@@ -82,6 +82,7 @@ uv run uvicorn virtual_life.main:app --env-file .env --host 127.0.0.1 --port 800
 | `[screen_vision]` | 服务端屏幕视觉开关、独立视觉 provider、TTL、图片/队列上限与视觉 token 子额度 |
 | `[voice]` | 连续语音文本轮次编排、会话期限、事件重放和旧调用收尾上限 |
 | `[speech]` | 服务端本地 Kokoro TTS worker、模型路径、并发、分句和播放缓冲上限 |
+| `[dist]` | Linux 桌面客户端分发：产物目录、上传密钥、单包与总包数上限 |
 
 模型地址与名称必须成对配置。自动记忆复用此模型，要求 JSON object 响应支持；摘要与知识图谱使用现有 SQLite，无需另配图数据库。每日模型额度由同一数据库内的全部伙伴和任务共享，按 UTC 日记账，详见 [自动记忆](automatic-memory.md)。默认召回额度/条数必须小于等于各自最大值；人格片段上限必须小于等于整个提示上限。
 
@@ -107,6 +108,33 @@ uv run uvicorn virtual_life.main:app --env-file .env --host 127.0.0.1 --port 800
 
 分类器不是内容过滤器，也不改变输出权限。需要 `uv sync --group train` 才能安装 `onnxruntime`/`transformers`（或 PyTorch 后端依赖）；未安装时 `observe`/`route` 会安全降级。`GET /v1/capabilities` 的 `scene_classifier` 对象报告模式、可用性、后端与版本，不返回原始用户文本。分类器只处理普通文本和语音用户回合；主动对话没有用户场景，不运行分类器，回执中的 `scene` 为 null。
 
+## 客户端分发配置
+
+`[dist]` 为 Linux 桌面客户端提供发布通道，供 `vl setup` 直接拉取最新版本。产物是运维者自行构建并上传的 wheel，运行时不生成、不校验其内容，只校验文件名与已发布的 sha256。
+
+| 字段 | 默认值 | 说明 |
+| --- | --- | --- |
+| `directory` | `.data/dist` | wheel 存放目录；TOML 相对路径以配置文件目录为基准 |
+| `upload_secret` | 空 | 上传专用密钥。为空时上传接口返回 503，下载不受影响 |
+| `max_bytes` | 67108864 | 单包字节上限，超出返回 413（1..2GiB） |
+| `max_packages` | 25 | 目录中保留的包数量上限，超出返回 409 |
+
+端点挂在已鉴权的 `/v1` 之下：`GET /v1/dist/manifest.json` 返回按版本升序排列的清单，`GET /v1/dist/packages/{wheel}` 下载，`POST /v1/dist/packages` 上传。下载只需普通 Bearer token；上传额外要求 `upload_secret`，因此泄漏的 `api_token` 无法替换后续座位将要下载的客户端。文件名必须匹配 `virtual_life_linux-<版本>-py3-none-any.whl`，不匹配一律 400。
+
+清单由目录内容派生，条目按 (mtime, size) 缓存，发布新客户端只需上传，无需重启。`default_version` 取最高版本，且正式版本序号高于其自身的预发布版本。
+
+发布一个客户端：
+
+```sh
+uv run --project clients/linux-node python clients/linux-node/packaging/build.py
+curl -H "Authorization: Bearer $OWNER_TOKEN" \
+  -F upload_secret="$DIST_SECRET" \
+  -F file=@clients/linux-node/dist/virtual_life_linux-0.1.1-py3-none-any.whl \
+  http://127.0.0.1:8038/v1/dist/packages
+```
+
+上传成功后席位侧只需 `vl setup --server http://127.0.0.1:8038 --version 0.1.1`。
+
 ## 环境变量对应
 
 保留已有环境变量，并补充运行时轮询、监听和策略覆盖。完整命名规则如下：
@@ -117,6 +145,8 @@ uv run uvicorn virtual_life.main:app --env-file .env --host 127.0.0.1 --port 800
 | `logging.<字段>` | `VIRTUAL_LIFE_LOGGING_<字段大写>` |
 | `runtime.database_path` | `VIRTUAL_LIFE_DATABASE` |
 | `runtime.api_token` | `VIRTUAL_LIFE_API_TOKEN` |
+| `runtime.auto_follow_rooms` | `VIRTUAL_LIFE_AUTO_FOLLOW_ROOMS` |
+| `runtime.auto_follow_quiet_seconds` | `VIRTUAL_LIFE_AUTO_FOLLOW_QUIET_SECONDS` |
 | `runtime.<其余字段>` | `VIRTUAL_LIFE_<字段大写>`，例如 `VIRTUAL_LIFE_EVENT_POLL_SECONDS` |
 | `model.base_url` | `VIRTUAL_LIFE_MODEL_BASE_URL` |
 | `model.name` | `VIRTUAL_LIFE_MODEL` |
@@ -145,6 +175,7 @@ uv run uvicorn virtual_life.main:app --env-file .env --host 127.0.0.1 --port 800
 | `screen_vision.<其余字段>` | `VIRTUAL_LIFE_SCREEN_VISION_<字段大写>` |
 | `voice.<字段>` | `VIRTUAL_LIFE_VOICE_<字段大写>` |
 | `speech.<字段>` | `VIRTUAL_LIFE_SPEECH_<字段大写>` |
+| `dist.<字段>` | `VIRTUAL_LIFE_DIST_<字段大写>` |
 
 布尔环境变量接受 `true/false/1/0`，不区分大小写。整数参数使用整数，时间与衰减参数使用有限正数。常用环境覆盖见 [.env.example](../.env.example)。示例：
 
@@ -220,6 +251,8 @@ L2 慢变量只读、聚合时不写库、不调用模型：读取时从 `emotio
 内在活动的内容和模板始终由本地规则生成，不修改人格、情绪或长期记忆。显式开启 `model_assisted` 后，模型只评判标签、强度与置信度，`rationale` 仅供审计且不进入提示；失败时回退本地规则。活动可以成为主动候选，但仅在伙伴主动策略开启、注意力新鲜且空闲、已有历史对话、冲动与冷却/每日限额均满足时才会经过对话输出 gate；默认阈值较高，新伙伴或专注场景不会因此频繁开口。接口与语义见[内在活动](inner-life.md)。
 
 可单独设置 `valence_half_life_seconds`、`arousal_half_life_seconds`、`control_half_life_seconds` 和 `resource_half_life_seconds`，范围均为整数 60..7200 秒。默认省略/None，沿用共享 half_life_seconds；精力与社交精力共用 resource 参数，安静请求有效期仍由共享参数控制。例如 `VIRTUAL_LIFE_EMOTION_AROUSAL_HALF_LIFE_SECONDS=600` 仅调整唤醒度恢复；四个可选参数的空环境变量将覆盖文件值并恢复共享半衰期。快照 recovery_half_lives 显示最终采用值。
+
+负面情绪（关切/心疼/烦躁）可通过 `negative_half_life_seconds` 使用更慢的半衰期（范围 60..7200 秒，默认 None 即与正面同用共享 half_life_seconds），反映负性偏差——坏事比好事残留更久（Baumeister、Bratslavsky、Finkenauer 与 Vohs 2001 的《Bad Is Stronger Than Good》；Rozin & Royzman 2001）。显式配置的某维度 half_life 仍优先于负面调整；如 `VIRTUAL_LIFE_EMOTION_NEGATIVE_HALF_LIFE_SECONDS=2400` 使负面以 2400 秒衰减而正面仍 1200 秒。
 
 ## 屏幕视觉配置
 

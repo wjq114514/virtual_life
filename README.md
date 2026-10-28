@@ -4,6 +4,14 @@
 
 接口包含节点注册与能力图、共读上下文、迁移握手、输出租约、事件回放、有召回预算的长期记忆，以及跨设备共享的人格与短期状态。WebUI 提供文本对话与记忆查看；模型由服务端配置，提示预览、记忆写入和召回在本地完成。
 
+## 设计理念
+
+每个设备是一个节点，节点相当于一个房间。生命体不是被创建出来等待召唤的，而是随着主人的步伐迁徙——主人走到哪个房间，她就出现在哪里。屏幕、语音、环境信号是房间自带的家具，让陪伴在具体的空间里发生，而不是悬浮于抽象的云端。
+
+同一份共同记忆、同一份人格、同一份短期状态，在不同房间之间接力传递。她在厨房听见你的说话，在书房看见你读的段落，在卧室的手机上接住你睡着前的最后一句问候——房间换了她没换。
+
+当前项目仍处于开发框架阶段，尚未形成一个可直接使用的成品。节点、能力、记忆、人格、语音、屏幕视觉这些子系统各自已具备可用原型，但完整的用户体验、真实的设备联调、稳定的人格表现和有温度的交互节奏还需要逐步打磨。
+
 ## 启动
 
 需要 Python 3.12+ 和 [uv](https://docs.astral.sh/uv/)。在项目根目录执行：
@@ -26,11 +34,11 @@ uv run python -m virtual_life
 uv run uvicorn virtual_life.main:app --env-file .env --host 127.0.0.1 --port 8000
 ```
 
-## WebUI 工作台
+## WebUI 实时日志与流程追踪
 
-页面使用原生 HTML / CSS / JavaScript，随 API 提供，无需另装前端依赖。通过右上角连接入口输入令牌，再选择或创建伙伴。工作台包含对话、人格、日子、记忆与记忆日志；伙伴状态常驻桌面右侧，窄屏可按需打开。各工作区支持链接定位和浏览器前进、后退，“预览提示”不调用模型。设计与验收范围见 [WebUI 重构](docs/webui-redesign.md)。
+页面使用原生 HTML / CSS / JavaScript，随 API 提供，无需另装前端依赖。连接后只显示两块面板：左侧**实时日志**尾随 `GET /v1/flow/logs` 的内存环形缓冲（级别过滤、跟随、清空），右侧**流程追踪**尾随 `GET /v1/events` 的运行事件（对话、迁移、节点、记忆、主动陪伴；暂停/继续、清空）。令牌经 Bearer 头或 `POST /v1/session` 换成 HttpOnly 会话 Cookie。合同与检查见 [WebUI](docs/webui.md)。
 
-对话页的“后台陪伴”可显式保存主动参与开关、每日次数和冷却，查看宿主注意力、专注段落、本地心理活动及最近决策。心理活动的内容始终由规则和模板生成，不写入人格、情绪或长期记忆；可选模型评判默认关闭，开启后也只调整标签与强度，失败即回退本地规则。它只在高门槛下生成主动候选。连续专注采用确认和释放滞回；主动文字只向仍有输出权的当前页面展示，不补播过时问候。需要宿主明确上报注意力与任务边界，浏览器可见或设备负载不会被当成专注证据。详见[后台陪伴合同](docs/proactivity.md)与[内在活动](docs/inner-life.md)。
+后台自触发已接入两类来源：宿主通过类型化注意力接口上报任务完成、开始休息或用户返回；以及 `inner_life` 根据既有情绪、慢变量、对话历史与空闲时间生成的短时心理活动。两者都要显式启用、chat 模式、参与条件与预算允许，且生成和呈现时复核上下文、epoch 与租约；专注、会议、静默、未知或过期信号默认不触发。主动文字只向仍有输出权的呈现端展示，不伪造用户发言或补播过时问候；其事件与决策可在流程追踪面板查看。Linux 已支持可选的[桌面状态自动采集](docs/linux-attention-collection.md)，会议、共享与专注识别仍保留未知。详见[注意力与自触发](docs/proactivity.md)、[内在活动](docs/inner-life.md)及[后台保护验证](docs/background-flow-validation.md)。
 
 实际对话需在 `virtual-life.toml` 的 `[model]` 中配置兼容 Chat Completions 的提供商，再重启服务。例如 [DeepSeek 官方接口](https://api-docs.deepseek.com/)：
 
@@ -42,9 +50,7 @@ api_key = "填写自己的密钥"
 extra_body = { thinking = { type = "disabled" } }
 ```
 
-模型密钥只由服务器读取，页面连接 token 只存当前页面内存。未配置模型时仍可浏览记忆和预览提示。点击“在此页对话”后，WebUI 复用设备节点并建立访问会话，刷新页面不再增加节点；可按局域网 IP 辅助识别或明确关联已有本机设备。需要跨设备迁移时仍等待原设备释放或租约到期，隐藏页面后需重新接入。详见[设备身份与访问](docs/device-identity.md)。
-
-聊天支持从模型到页面的流式输出，生成时逐段显示临时回复，完成后以持久回执确认。发送结果包含真实用量和纳入提示的记忆引用。网络结果不明确时，查询原命令回执；服务器不会重新执行同一命令。完成的对话可手动摘取内容保存为有来源的记忆。详细配置、恢复和边界见 [WebUI 合同](docs/webui.md)和[流式对话协议](docs/dialogue-streaming.md)。
+模型密钥只由服务器读取，页面连接 token 只存当前页面内存，或经 `POST /v1/session` 换成服务器签名的 HttpOnly 会话 Cookie（脚本读不到、不随跨站请求发送、不包含令牌本身）。未配置模型不影响日志与事件查看。详见[设备身份与访问](docs/device-identity.md)与 [WebUI 合同](docs/webui.md)。
 
 ## 连续语音与服务端视觉
 
@@ -170,6 +176,15 @@ python3 clients/system-node/node_client.py --config clients/system-node/examples
 
 上报链路在线、设备可达、人的操作和角色呈现分别有明确字段。网关收到 HTTP 响应只能说明端点可达；未知指标保留为 `null`。采样默认每 20 秒一次，不调用模型、不自动写长期记忆。协议、来源、新鲜度和扩展路线见 [设备状态跟踪](docs/device-state-tracking.md)。
 
+[QQ 节点桥](clients/qq-node/README.md) 把 QQ（OneBot v11 反向 WebSocket）接入为另一个房间：私聊消息映射为对话轮次，「正在输入 / 在线」映射为 attention 样本（`user_present` + `activity=chat`），伙伴回复通过 `send_private_msg` 回发。运行（stdlib-only，Python 3.12+）：
+
+```bash
+VIRTUAL_LIFE_API_TOKEN=local-dev-token \
+python3 clients/qq-node/qq_node.py --config clients/qq-node/example.json
+```
+
+事件映射、配置字段与单测命令见该目录 README。
+
 ## 长期记忆
 
 当前保存工作上下文、共同经历、稳定认识、派生摘要与知识图谱。完成对话默认自动排队，在同一伙伴积累 4 轮或最旧事件等待 60 秒后批量整理；用户明确陈述形成未经确认的事实、偏好和关系，助手文字作为对话行为归档。手动记录、手动编辑及固定/确认内容受保护。记忆页可查看进度、摘要、关系及提前整理。
@@ -178,7 +193,7 @@ python3 clients/system-node/node_client.py --config clients/system-node/examples
 
 自动整理复用当前配置模型，需要 JSON object 响应支持；Linux/POSIX 后端使用文件锁协调执行和中断恢复。统一配置 `[automatic_memory]` 设置开关、批次、等待时间和输出预算，`[memory]` 设置共享额度；环境变量仍可覆盖。关闭开关后仍可显式保存与读取已有记忆。配置、参考插件与限制见 [自动记忆、摘要与图谱](docs/automatic-memory.md)，基础合同见 [长期记忆设计](docs/memory.md)。
 
-`[embedding]` 可启用独立向量模型，自动索引已有和新增有效记忆，并与词法、摘要、图谱融合召回。纯 CPU 部署可接本地 TEI 并用 `local=true` 跳过付费日额度；`[rerank]` 可选、默认关闭，只作用于显式语义召回，超时即回退，不影响对话延迟。实际对话可准备查询向量，普通预览仍不调用模型。图谱支持规范实体、显式别名、独立来源聚合和有界多跳检索。WebUI 可查看索引、使用语义召回及编辑别名。向量模型默认关闭，CPU 模型建议、启用与费用规则见 [向量记忆与图谱](docs/vector-memory-and-graph.md)。ANN 与失效旧摘要自动重建仍在后续阶段。
+`[embedding]` 可启用独立向量模型，自动索引已有和新增有效记忆，并与词法、摘要、图谱融合召回。纯 CPU 部署可接本地 TEI 并用 `local=true` 跳过付费日额度；`[rerank]` 可选、默认关闭，只作用于显式语义召回，超时即回退，不影响对话延迟。实际对话可准备查询向量，普通预览仍不调用模型。图谱支持规范实体、显式别名、独立来源聚合和有界多跳检索；记忆日志、自动整理与图谱相关事件显示在流程追踪面板。向量模型默认关闭，CPU 模型建议、启用与费用规则见 [向量记忆与图谱](docs/vector-memory-and-graph.md)。ANN 仍在后续阶段，失效旧摘要自动重建已提供。
 
 ## 基础人格与陪伴方式
 
@@ -196,7 +211,7 @@ uv run python examples/personality_preview.py --show-prompt
 
 示例角色卡是 [sui.v2.json](examples/character_cards/sui.v2.json)。此脚本会写入演示节点、人格、状态与一条共读记忆。预览的 `model_calls` 为 0；真实文本对话可在 WebUI 中通过配置的模型执行。
 
-后台自触发已接入两类来源：宿主通过类型化注意力接口上报任务完成、开始休息或用户返回；以及 `inner_life` 根据既有情绪、慢变量、对话历史与空闲时间生成的短时心理活动。两者都要显式启用、chat 模式、参与条件与预算允许，且生成和呈现时复核上下文、epoch 与租约；专注、会议、静默、未知或过期信号默认不触发。WebUI 可查看专注段、心理活动与决策、配置策略并呈现仍有效的主动文字，不伪造用户发言或补播过时问候。Linux 已支持可选的[桌面状态自动采集](docs/linux-attention-collection.md)，会议、共享与专注识别仍保留未知。详见[注意力与自触发](docs/proactivity.md)、[内在活动](docs/inner-life.md)及[后台保护验证](docs/background-flow-validation.md)。
+后台自触发已接入两类来源：宿主通过类型化注意力接口上报任务完成、开始休息或用户返回；以及 `inner_life` 根据既有情绪、慢变量、对话历史与空闲时间生成的短时心理活动。两者都要显式启用、chat 模式、参与条件与预算允许，且生成和呈现时复核上下文、epoch 与租约；专注、会议、静默、未知或过期信号默认不触发。主动文字只向仍有输出权的呈现端展示，不伪造用户发言或补播过时问候；其事件与决策可在流程追踪面板查看。Linux 已支持可选的[桌面状态自动采集](docs/linux-attention-collection.md)，会议、共享与专注识别仍保留未知。详见[注意力与自触发](docs/proactivity.md)、[内在活动](docs/inner-life.md)及[后台保护验证](docs/background-flow-validation.md)。
 
 模型工具默认关闭。开启 `[tools]` 后，模型可在对话或主动轮次中安排延迟发言、创建/列出/取消计划任务或提醒，并把明确请求委派给外部代理；主动计划和计划任务到点仍须通过全部参与与输出 gate。工具通过 `ToolRegistry` 注册，内建工具与受信任的 `module:factory` 插件共享同一合同，委派执行器也可替换。插件接口、错误、限额与查询 API 见[模型工具与插件](docs/tools.md)。
 

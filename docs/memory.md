@@ -94,7 +94,7 @@ app = create_app(
 
 客户端未填写召回规模时使用注入策略的默认值。ModelProvider、MemoryConsolidator、PerceptionProvider 和 SpeechProvider 定义在 ports.py。ModelProvider 已接入单次文本对话与自动整理，均遵循调用前预留、调用后按实际 usage 结算的约定。自动整理配置见 .env.example 与 [自动记忆配置](automatic-memory.md)。
 
-后续可增加失效摘要重建、ANN 索引与程序经验。当前向量保存在 SQLite，使用 `float32` BLOB、numpy 批量打分和有限候选的余弦扫描；旧 JSON 向量会在后台有限回填。图谱检索已有证据路径，不生成新的推理事实。精确证据校验不等于语义正确性证明，自动积累效果仍需真实长期数据评估。
+失效摘要重建已提供；后续可增加 ANN 索引与程序经验。当前向量保存在 SQLite，使用 `float32` BLOB、numpy 批量打分和有限候选的余弦扫描；旧 JSON 向量会在后台有限回填。图谱检索已有证据路径，不生成新的推理事实。精确证据校验不等于语义正确性证明，自动积累效果仍需真实长期数据评估。
 
 ## 有下限的记忆衰减
 

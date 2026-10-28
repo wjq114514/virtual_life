@@ -416,6 +416,17 @@ def _build_model_cmd() -> list[str] | None:
     return cmd
 
 
+def _stop_requested(only_model: bool, only_api: bool) -> None:
+    """Stop the subset of services selected by the CLI flags."""
+    if only_model:
+        _stop_model()
+    elif only_api:
+        _stop_api()
+    else:
+        _stop_api()
+        _stop_model()
+
+
 def _start_model() -> int | None:
     _ensure_data_dir()
     pid_path = _model_pidfile()
@@ -772,23 +783,21 @@ def main() -> int:
         return exit_code
 
     if args.command == "stop":
-        if only_api:
-            _stop_api()
-        else:
-            _stop_api()
-            if not only_model:
-                _stop_model()
+        _stop_requested(only_model, only_api)
         return 0
 
     if args.command == "restart":
-        if only_api:
-            _stop_api()
-        else:
-            _stop_api()
-            if not only_model:
-                _stop_model()
-        # Re-invoke start
-        return main()
+        _stop_requested(only_model, only_api)
+        # Mirror the start branch rather than re-invoking main(), which would
+        # re-parse args.command == "restart" and recurse forever.
+        exit_code = 0
+        if not only_api:
+            if _start_model() is None:
+                exit_code = 1
+        if not only_model:
+            if _start_api() is None:
+                exit_code = 1
+        return exit_code
 
     if args.command == "status":
         if only_model:

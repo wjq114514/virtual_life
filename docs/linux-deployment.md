@@ -89,4 +89,4 @@ python3 installer.py --bundle bundle.tar.gz --config-file config.json --token-fi
 
 手动提供的 Token 权限由其签发方决定；CLI 不会自行联系管理接口申请新凭据。包和示例不包含实际 Token。已在 Ubuntu 24.04 x86_64 虚拟机上通过真实 WebUI、OpenSSH、systemd 验证首装、重装、密码/加密私钥、非 root 免密 sudo、设备采样、撤销和两类启动故障回滚；环境、复现脚本和其他平台边界见[真实联调验收](real-validation-report.md)。
 
-WebUI 专项可通过 `uv run --with playwright python examples/webui_linux_smoke.py` 重现（先安装 Chromium，或传入 `--browser-executable`）。该脚本使用隔离静态服务和模拟 API，不访问实际运行时或设备；结果与截图默认写入 `.data/webui-linux-review/`。后端安装、凭据和 SSH 握手测试使用 `uv run pytest backend/tests/test_linux*.py backend/tests/test_node_credentials.py`。
+后端安装、凭据和 SSH 握手测试使用 `uv run pytest backend/tests/test_linux*.py backend/tests/test_node_credentials.py`；实时日志与流程追踪界面可用 `uv run --with playwright python examples/webui_smoke.py` 重现。

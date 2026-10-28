@@ -43,7 +43,7 @@ Web access 使用节点 TTL，心跳仅刷新自身 context 和有效期。过�
 
 原生注册能力与原生 heartbeat context 不被 Web 覆盖。活跃 Web 临时贡献 `text.display`，其过期后不残留；原生宿主在线时仍提供自己的能力与状态。原生宿主已离线、仅浏览器在线时，不再宣称旧的音频或采集能力可用。NodeSnapshot 的 device 显示设备 ID、MAC 和观测 IP；IP 显示是线索，不等于硬件身份。accesses 仅列出当前活跃 Web 访问。
 
-原生协议的注册/心跳仍整体替换自身能力/context；同设备的多个原生进程应由统一宿主聚合为一个写入者。此轮分离的是 Web 访问，尚未提供任意原生进程的多写入者仲裁。
+原生协议的注册/心跳仍整体替换自身能力/context；同设备的多个原生进程应由统一宿主聚合为一个写入者，或各自维护独立 `session_id` 让服务端按 `device_state` 的会话/序号仲裁旧写入者（见[设备状态跟踪](device-state-tracking.md)）。此轮已分离 Web 访问并增加 device_state 会话仲裁，任意原生进程的完整合并聚合仍属于宿主职责。
 
 ## API 与输出校验
 

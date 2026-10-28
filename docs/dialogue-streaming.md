@@ -72,7 +72,6 @@ Android SDK 提供 `RuntimeApi.streamDialogue(companionId, request, onEvent)` �
 后端测试 `backend/tests/test_model_streaming.py` 与 `backend/tests/test_streaming_dialogue.py` 使用确定性模型、MockTransport 和临时数据库，覆盖提供商分片、用量、幂等、生成中上下文失效、有限草稿与最终完整回执。浏览器脚本使用本地假模型、随机端口和临时 SQLite，不需要模型密钥：
 
 ```bash
-uv run --with playwright python examples/webui_stream_smoke.py --browser-executable /path/to/chromium
 uv run --with playwright python examples/webui_smoke.py --browser-executable /path/to/chromium
 ```
 
