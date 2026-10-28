@@ -5,7 +5,7 @@ import json
 import logging
 import re
 from collections.abc import Callable
-from datetime import UTC
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from time import perf_counter
 from typing import Literal
@@ -43,6 +43,11 @@ _SPEAKER_PREFIX = re.compile(
 # A tool round and the final reply are separate provider calls. Reserve for both
 # the echoed tool call and a small tool result in addition to the final output.
 _TOOL_RESULT_TOKENS = 256
+
+# A parked external turn keeps its model-token reservation for this long. Past the
+# deadline the reservation is released and the command is discarded, so an agent
+# that dies mid-turn cannot starve the companion's budget.
+_COMMIT_TTL_SECONDS = 300
 
 
 def strip_speaker_prefix(text: str, companion_name: str) -> str:
@@ -117,6 +122,10 @@ class _TextDialogueRequest(PersonalityPreview):
     epoch: int = Field(strict=True, ge=0, le=2**63 - 1)
     expected_revision: int = Field(strict=True, ge=0, le=2**63 - 1)
     max_output_tokens: int = Field(default=512, ge=1, le=1024)
+    # `external` parks the turn at the dispatch gate and returns the assembled
+    # prompt instead of calling a model, so an outside agent can generate the
+    # reply and commit it through `commit_turn` under the same gates.
+    generator: Literal["internal", "external"] = "internal"
 
 
 class DialogueRequest(_TextDialogueRequest):
@@ -161,11 +170,23 @@ class DialogueUsage(BaseModel):
     output_tokens: TokenCount
 
 
+class DialogueCommitRequest(BaseModel):
+    """An externally generated reply, committed under the parked turn's gates."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+    assistant_message: str = Field(min_length=1, max_length=65536)
+    model: str | None = None
+    usage: DialogueUsage | None = None
+    # Diagnostics only. A tool trace never gates output; it is recorded on the
+    # completed event so the external agent's tool use stays auditable.
+    tool_trace: list[JsonObject] = Field(default_factory=list)
+
+
 class DialogueResult(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     command_id: Identifier
     companion_id: Identifier
-    status: Literal["completed", "silent", "discarded"]
+    status: Literal["completed", "silent", "discarded", "awaiting_generation"]
     discard_reason: str | None = None
     assistant_message: str | None = None
     source_event_id: Identifier | None = None
@@ -252,6 +273,11 @@ class DialogueService:
             raise DialogueError(
                 409, "dialogue_in_progress", "Dialogue command is already in progress"
             )
+        if row["status"] == "awaiting_generation":
+            # A parked turn stores its receipt next to the resumable state. Only
+            # the receipt is public; the pillars used by the commit gate stay
+            # server-side.
+            return json.loads(row["result_json"])["receipt"]
         if row["error_json"] is not None:
             error = json.loads(row["error_json"])
             raise DialogueError(**error)
@@ -511,6 +537,10 @@ class DialogueService:
         for channel in ("access_id", "presentation_id"):
             if data.get(channel) is None:
                 data.pop(channel, None)
+        # `internal` is the legacy path; keeping it out of the fingerprint stops an
+        # upgrade from invalidating every command id that is still in flight.
+        if data.get("generator", "internal") == "internal":
+            data.pop("generator", None)
         fingerprint = hashlib.sha256(
             _json({"companion_id": companion_id, "payload": data}).encode()
         ).hexdigest()
@@ -828,6 +858,19 @@ class DialogueService:
                     reserved = False
                     raise
                 mark("dispatch_gate_ms")
+                if request.generator == "external":
+                    # Park after the dispatch gate: the reservation stays held, the
+                    # assembled prompt carries the same budget the provider would
+                    # have received, and commit revalidates the same versions.
+                    result.status = "awaiting_generation"
+                    return self._park(
+                        companion_id,
+                        request,
+                        proactive=proactive,
+                        snapshots=snapshots,
+                        result=result,
+                        task_id=task_id,
+                    )
                 draft = ""
                 sequence = 0
                 draft_wire_bytes = 0
@@ -1059,123 +1102,20 @@ class DialogueService:
                         result.model = reply_model
                         result.usage = usage
                         result.model_calls = model_calls
-            with self.store.transaction(write=True) as connection:
-                now = self._now()
-                try:
-                    current = self._snapshots(connection, companion_id, request, now)
-                    if not self._same_context(current, snapshots):
-                        raise DialogueError(
-                            409, "dialogue_context_changed", "Personality or state changed"
-                        )
-                    self._validate_references(connection, companion_id, preview, now)
-                except (DialogueError, DomainError, PersonalityError, MemoryError) as exc:
-                    result.status = "discarded"
-                    result.discard_reason = exc.code
-                    result.assistant_message = None
-                if stream_invalidated is not None:
-                    result.status = "discarded"
-                    result.discard_reason = stream_invalidated
-                    result.assistant_message = None
-                if control is not None and control.should_stop() and result.status == "completed":
-                    # An output-generation revoke committed before this receipt wins.
-                    result.status = "discarded"
-                    result.discard_reason = control.reason
-                    result.assistant_message = None
-                if result.status == "completed":
-                    if not proactive:
-                        self.memory_service.record_dialogue_usage(
-                            connection,
-                            companion_id,
-                            request.command_id,
-                            preview["memory_versions"],
-                            request.user_message[:2048],
-                            now,
-                        )
-                    event = self.coordinator._emit(
-                        connection,
-                        now,
-                        f"{event_prefix}_completed",
-                        {
-                            "command_id": request.command_id,
-                            **(
-                                {
-                                    "candidate_id": request.candidate_id,
-                                    "epoch": request.epoch,
-                                    "companion_revision": request.expected_revision,
-                                }
-                                if proactive
-                                else {"user_message": request.user_message}
-                            ),
-                            "assistant_message": result.assistant_message,
-                            "memory_refs": preview["memory_refs"],
-                            "memory_versions": preview["memory_versions"],
-                            "usage": result.usage.model_dump(),
-                        },
-                        companion_id=companion_id,
-                        node_id=request.node_id,
-                        recipient_node_id=request.node_id,
-                    )
-                    result.source_event_id = event["event_id"]
-                    if self.emotion_service is not None and not proactive:
-                        self.emotion_service.complete(
-                            connection,
-                            received["event_id"],
-                            event["event_id"],
-                            result.assistant_message,
-                            now,
-                        )
-                    if self.automatic_memory is not None and not proactive:
-                        self.automatic_memory.enqueue(connection, event)
-                else:
-                    self.coordinator._emit(
-                        connection,
-                        now,
-                        f"{event_prefix}_{result.status}",
-                        {
-                            "command_id": request.command_id,
-                            "status": result.status,
-                            "discard_reason": result.discard_reason,
-                        },
-                        companion_id=companion_id,
-                        node_id=request.node_id,
-                    )
-                if self.emotion_service is not None:
-                    p = self.personality_service
-                    profile = p._profile_snapshot(
-                        companion_id, p._profile_row(connection, companion_id)
-                    )
-                    legacy = p._state_snapshot(
-                        companion_id, p._state_row(connection, companion_id), now
-                    )
-                    result.emotion = EmotionSnapshot.model_validate(
-                        self.emotion_service.snapshot(
-                            connection, companion_id, profile, legacy, now
-                        )
-                    )
-                receipt = result.model_dump(mode="json")
-                connection.execute(
-                    "UPDATE dialogue_commands SET status = ?, result_json = ? WHERE command_id = ?",
-                    (result.status, _json(receipt), request.command_id),
-                )
-                mark("commit_ms")
-                mark("total_ms")
-                self.memory_service.logs.record(
-                    companion_id,
-                    "dialogue",
-                    result.status,
-                    command_id=request.command_id,
-                    duration_ms=timings.get("total_ms"),
-                    details={
-                        "memory_versions": preview["memory_versions"],
-                        "entity_versions": preview.get("entity_versions", []),
-                        "usage": result.usage.model_dump() if result.usage else None,
-                        "model_calls": result.model_calls,
-                        "streaming": on_event is not None,
-                        "timings_ms": timings,
-                    },
-                    connection=connection,
-                )
-            return receipt
+            return self._finalize(
+                companion_id=companion_id,
+                request=request,
+                proactive=proactive,
+                snapshots=snapshots,
+                preview=preview,
+                result=result,
+                timings=timings,
+                mark=mark,
+                stream_invalidated=stream_invalidated,
+                control=control,
+                received=received,
+                streaming=on_event is not None,
+            )
         except (MemoryError, PersonalityError, DomainError) as exc:
             return self._fail(
                 request.command_id, DialogueError(exc.status_code, exc.code, exc.message)
@@ -1191,3 +1131,262 @@ class DialogueService:
             return self._fail(
                 request.command_id, DialogueError(500, "dialogue_execution_failed", message)
             )
+
+    def _finalize(
+        self,
+        *,
+        companion_id,
+        request,
+        proactive,
+        snapshots,
+        preview,
+        result,
+        timings,
+        mark,
+        stream_invalidated,
+        control,
+        received,
+        streaming,
+    ):
+        """Run the final gates, side effects, and receipt write for one turn.
+
+        Shared by the in-process provider path and by ``commit_turn``, so an
+        externally generated reply passes exactly the same context, reference,
+        emotion, memory, and event gates as a locally generated one.
+        """
+        event_prefix = "companion.proactive" if proactive else "companion.dialogue"
+        with self.store.transaction(write=True) as connection:
+            now = self._now()
+            try:
+                current = self._snapshots(connection, companion_id, request, now)
+                if not self._same_context(current, snapshots):
+                    raise DialogueError(
+                        409, "dialogue_context_changed", "Personality or state changed"
+                    )
+                self._validate_references(connection, companion_id, preview, now)
+            except (DialogueError, DomainError, PersonalityError, MemoryError) as exc:
+                result.status = "discarded"
+                result.discard_reason = exc.code
+                result.assistant_message = None
+            if stream_invalidated is not None:
+                result.status = "discarded"
+                result.discard_reason = stream_invalidated
+                result.assistant_message = None
+            if control is not None and control.should_stop() and result.status == "completed":
+                # An output-generation revoke committed before this receipt wins.
+                result.status = "discarded"
+                result.discard_reason = control.reason
+                result.assistant_message = None
+            if result.status == "completed":
+                if not proactive:
+                    self.memory_service.record_dialogue_usage(
+                        connection,
+                        companion_id,
+                        request.command_id,
+                        preview["memory_versions"],
+                        request.user_message[:2048],
+                        now,
+                    )
+                event = self.coordinator._emit(
+                    connection,
+                    now,
+                    f"{event_prefix}_completed",
+                    {
+                        "command_id": request.command_id,
+                        **(
+                            {
+                                "candidate_id": request.candidate_id,
+                                "epoch": request.epoch,
+                                "companion_revision": request.expected_revision,
+                            }
+                            if proactive
+                            else {"user_message": request.user_message}
+                        ),
+                        "assistant_message": result.assistant_message,
+                        "memory_refs": preview["memory_refs"],
+                        "memory_versions": preview["memory_versions"],
+                        "usage": result.usage.model_dump(),
+                    },
+                    companion_id=companion_id,
+                    node_id=request.node_id,
+                    recipient_node_id=request.node_id,
+                )
+                result.source_event_id = event["event_id"]
+                if self.emotion_service is not None and not proactive:
+                    self.emotion_service.complete(
+                        connection,
+                        received["event_id"],
+                        event["event_id"],
+                        result.assistant_message,
+                        now,
+                    )
+                if self.automatic_memory is not None and not proactive:
+                    self.automatic_memory.enqueue(connection, event)
+            else:
+                self.coordinator._emit(
+                    connection,
+                    now,
+                    f"{event_prefix}_{result.status}",
+                    {
+                        "command_id": request.command_id,
+                        "status": result.status,
+                        "discard_reason": result.discard_reason,
+                    },
+                    companion_id=companion_id,
+                    node_id=request.node_id,
+                )
+            if self.emotion_service is not None:
+                p = self.personality_service
+                profile = p._profile_snapshot(
+                    companion_id, p._profile_row(connection, companion_id)
+                )
+                legacy = p._state_snapshot(
+                    companion_id, p._state_row(connection, companion_id), now
+                )
+                result.emotion = EmotionSnapshot.model_validate(
+                    self.emotion_service.snapshot(connection, companion_id, profile, legacy, now)
+                )
+            receipt = result.model_dump(mode="json")
+            connection.execute(
+                "UPDATE dialogue_commands SET status = ?, result_json = ? WHERE command_id = ?",
+                (result.status, _json(receipt), request.command_id),
+            )
+            mark("commit_ms")
+            mark("total_ms")
+            self.memory_service.logs.record(
+                companion_id,
+                "dialogue",
+                result.status,
+                command_id=request.command_id,
+                duration_ms=timings.get("total_ms"),
+                details={
+                    "memory_versions": preview["memory_versions"],
+                    "entity_versions": preview.get("entity_versions", []),
+                    "usage": result.usage.model_dump() if result.usage else None,
+                    "model_calls": result.model_calls,
+                    "streaming": streaming,
+                    "timings_ms": timings,
+                },
+                connection=connection,
+            )
+        return receipt
+
+    def _park(self, companion_id, request, *, proactive, snapshots, result, task_id):
+        """Persist a dispatch-gated turn whose reply will be produced elsewhere."""
+        pending = {
+            "request": request.model_dump(mode="json"),
+            "snapshots": list(snapshots),
+            "task_id": task_id,
+            "proactive": proactive,
+            "parked_at": self._now().isoformat(timespec="microseconds"),
+        }
+        receipt = result.model_dump(mode="json")
+        with self.store.transaction(write=True) as connection:
+            connection.execute(
+                "UPDATE dialogue_commands SET status = ?, result_json = ? WHERE command_id = ?",
+                (
+                    "awaiting_generation",
+                    _json({"receipt": receipt, "pending": pending}),
+                    request.command_id,
+                ),
+            )
+        return receipt
+
+    def _expire(self, companion_id, command_id, pending, stored):
+        """Discard a parked turn whose commit deadline passed, releasing its budget."""
+        result = DialogueResult.model_validate(stored["receipt"])
+        result.status = "discarded"
+        result.discard_reason = "dialogue_commit_expired"
+        result.assistant_message = None
+        self.memory_service.release_model_tokens(companion_id, pending["task_id"])
+        with self.store.transaction(write=True) as connection:
+            connection.execute(
+                "UPDATE dialogue_commands SET status = 'discarded', result_json = ? "
+                "WHERE command_id = ?",
+                (_json(result.model_dump(mode="json")), command_id),
+            )
+            self.memory_service.logs.record(
+                companion_id,
+                "dialogue",
+                "discarded",
+                command_id=command_id,
+                details={"error_code": "dialogue_commit_expired"},
+                connection=connection,
+            )
+        raise DialogueError(409, "dialogue_commit_expired", "The parked turn expired before commit")
+
+    def commit_turn(self, companion_id: str, command_id: str, payload: dict) -> dict:
+        """Commit an externally generated reply to a parked turn.
+
+        Idempotent by ``command_id``: replaying a committed or failed command
+        returns its stored receipt or error instead of writing a second turn.
+        """
+        companion_id = self.personality_service._identifier(companion_id)
+        try:
+            body = DialogueCommitRequest.model_validate(payload)
+        except ValidationError as exc:
+            raise DialogueError(
+                422,
+                "validation_error",
+                exc.errors(include_input=False, include_url=False)[0]["msg"],
+            ) from None
+        with self.memory_service.logs.correlate(command_id=command_id):
+            with self.store.transaction() as connection:
+                row = connection.execute(
+                    "SELECT * FROM dialogue_commands WHERE companion_id = ? AND command_id = ?",
+                    (companion_id, command_id),
+                ).fetchone()
+            if row is None:
+                raise DialogueError(404, "not_found", "Dialogue command was not found")
+            if row["status"] != "awaiting_generation":
+                return self._read(row)
+            stored = json.loads(row["result_json"])
+            pending = stored["pending"]
+            if self._now() - datetime.fromisoformat(pending["parked_at"]) > timedelta(
+                seconds=_COMMIT_TTL_SECONDS
+            ):
+                return self._expire(companion_id, command_id, pending, stored)
+            request_payload = pending["request"]
+            if pending["proactive"]:
+                request = ProactiveDialogueRequest.model_validate(request_payload)
+            elif "voice" in request_payload:
+                request = VoiceDialogueRequest.model_validate(request_payload)
+            else:
+                request = DialogueRequest.model_validate(request_payload)
+            proactive = bool(pending["proactive"])
+            snapshots = pending["snapshots"]
+            task_id = pending["task_id"]
+            result = DialogueResult.model_validate(stored["receipt"])
+            preview = result.preview.model_dump(mode="json")
+            result.status = "completed"
+            result.assistant_message = strip_speaker_prefix(
+                body.assistant_message, str(snapshots[0].get("name", ""))
+            )
+            result.model = body.model or result.model
+            result.model_calls = 0
+            result.usage = body.usage or DialogueUsage(input_tokens=0, output_tokens=0)
+            if body.usage is not None:
+                self.memory_service.settle_model_tokens(
+                    companion_id, task_id, body.usage.model_dump()
+                )
+            else:
+                self.memory_service.release_model_tokens(companion_id, task_id)
+            try:
+                return self._finalize(
+                    companion_id=companion_id,
+                    request=request,
+                    proactive=proactive,
+                    snapshots=snapshots,
+                    preview=preview,
+                    result=result,
+                    timings={"external_commit": 0},
+                    mark=lambda _name: None,
+                    stream_invalidated=None,
+                    control=None,
+                    received={"event_id": result.accepted_event_id},
+                    streaming=False,
+                )
+            except (MemoryError, PersonalityError, DomainError) as exc:
+                return self._fail(command_id, DialogueError(exc.status_code, exc.code, exc.message))
+            except DialogueError as exc:
+                return self._fail(command_id, exc)

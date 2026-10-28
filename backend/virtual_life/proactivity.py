@@ -910,7 +910,18 @@ class ProactivityService:
                     self._enqueue(connection, c._companion(row), event, sample, now)
             return self._attention(connection, node_id, now)
 
-        return self.coordinator._write(action, operation="attention", subject=node_id, command=data)
+        result = self.coordinator._write(
+            action, operation="attention", subject=node_id, command=data
+        )
+        # A fresh attention sample with the user present is room activity: the
+        # lifeform flows to whichever room last saw the user, even when the
+        # companion was parked in an empty room before.
+        if self.coordinator.auto_follow_rooms and sample.get("user_present"):
+            try:
+                self.coordinator.record_room_activity(node_id, self.coordinator._now())
+            except Exception:
+                pass
+        return result
 
     def _enqueue(self, connection, companion, event, sample, now):
         identity = _json(

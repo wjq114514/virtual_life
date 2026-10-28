@@ -31,6 +31,30 @@ data class DialogueRequest(
     @SerialName("presentation_id") val presentationId: String? = null,
 )
 
+/**
+ * One completed user-initiated turn from GET /v1/companions/{id}/dialogue/history.
+ * History grants no present-output rights and never triggers a model or memory write.
+ */
+@Serializable
+data class DialogueHistoryItem(
+    @SerialName("event_id") val eventId: String,
+    val sequence: Long,
+    @SerialName("command_id") val commandId: String?,
+    @SerialName("node_id") val nodeId: String?,
+    @SerialName("occurred_at") val occurredAt: String,
+    @SerialName("user_message") val userMessage: String,
+    @SerialName("assistant_message") val assistantMessage: String,
+)
+
+/** Newest first, exclusive cursor; a null next cursor means the client has reached the start. */
+@Serializable
+data class DialogueHistoryPage(
+    @SerialName("companion_id") val companionId: String,
+    val items: List<DialogueHistoryItem>,
+    @SerialName("next_before_sequence") val nextBeforeSequence: Long? = null,
+    @SerialName("has_more") val hasMore: Boolean = false,
+)
+
 @Serializable
 data class DialogueUsage(
     @SerialName("input_tokens") val inputTokens: Int,

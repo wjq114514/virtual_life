@@ -718,6 +718,25 @@ class RuntimeApi(
     suspend fun getDialogueResult(companionId: String, commandId: String): DialogueResult =
         get(listOf("v1", "companions", companionId, "dialogue", commandId))
 
+    /**
+     * Completed dialogue turns, newest first; [beforeSequence] is the exclusive cursor from the
+     * previous page's next_before_sequence. History grants no output rights.
+     */
+    suspend fun dialogueHistory(
+        companionId: String,
+        beforeSequence: Long? = null,
+        limit: Int = 20,
+    ): DialogueHistoryPage {
+        require(limit in 1..100)
+        require(beforeSequence == null || beforeSequence in 0..9_007_199_254_740_991L)
+        val query = if (beforeSequence == null) {
+            mapOf("limit" to limit.toString())
+        } else {
+            mapOf("before_sequence" to beforeSequence.toString(), "limit" to limit.toString())
+        }
+        return get(listOf("v1", "companions", companionId, "dialogue", "history"), query)
+    }
+
     suspend fun prepareTransfer(companionId: String, body: TransferPrepare): TransferSnapshot =
         post(listOf("v1", "companions", companionId, "transfers"), body)
 
