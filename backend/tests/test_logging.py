@@ -141,3 +141,76 @@ def test_static_and_health_paths_are_debug_only(caplog):
         assert client.get("/healthz").status_code == 200
         assert client.get("/ui/index.html").status_code == 200
     assert not [record for record in caplog.records if record.name == "virtual_life.http"]
+
+
+def test_flow_log_buffer_ring_capacity_and_cursor():
+    from virtual_life.log import FlowLogBuffer
+
+    buffer = FlowLogBuffer(5)
+    # capacity is clamped to a minimum
+    assert buffer.capacity == 64
+    logger = logging.getLogger("virtual_life.ring_test")
+    logger.setLevel(logging.DEBUG)
+
+    class DirectHandler(logging.Handler):
+        def __init__(self, buf):
+            super().__init__()
+            self.buf = buf
+
+        def emit(self, record):
+            self.buf.append(record)
+
+    handler = DirectHandler(buffer)
+    logger.addHandler(handler)
+    try:
+        for index in range(8):
+            logger.info("line-%d", index)
+        page = buffer.read(0, 200)
+        assert page["items"] and len(page["items"]) == 8
+        assert page["next_sequence"] == 8
+        assert [item["message"] for item in page["items"]][-1] == "line-7"
+        # page from a live cursor
+        tail = buffer.read(5, 2)
+        assert [item["sequence"] for item in tail["items"]] == [7, 8]
+        assert tail["next_sequence"] == 8
+        # nothing newer
+        latest = buffer.read(8, 2)
+        assert latest["items"] == [] and latest["next_sequence"] == 8
+        # validation
+        import pytest as _pytest
+
+        with _pytest.raises(ValueError):
+            buffer.read(-1, 2)
+        with _pytest.raises(ValueError):
+            buffer.read(0, 0)
+    finally:
+        logger.removeHandler(handler)
+
+
+def test_flow_log_buffer_drops_oldest_after_capacity():
+    from virtual_life.log import FlowLogBuffer
+
+    buffer = FlowLogBuffer(70)
+    logger = logging.getLogger("virtual_life.ring_cap")
+    logger.setLevel(logging.DEBUG)
+
+    class DirectHandler(logging.Handler):
+        def __init__(self, buf):
+            super().__init__()
+            self.buf = buf
+
+        def emit(self, record):
+            self.buf.append(record)
+
+    handler = DirectHandler(buffer)
+    logger.addHandler(handler)
+    try:
+        for index in range(80):
+            logger.info("line-%d", index)
+        page = buffer.read(0, 200)
+        # Only the newest `capacity` entries survive.
+        assert len(page["items"]) == 70
+        assert page["items"][0]["sequence"] == 11
+        assert page["items"][-1]["sequence"] == 80
+    finally:
+        logger.removeHandler(handler)

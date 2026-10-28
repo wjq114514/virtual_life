@@ -14,6 +14,7 @@ import logging
 import os
 import re
 import sys
+import threading
 import time
 import uuid
 from contextlib import contextmanager
@@ -47,10 +48,12 @@ _NOISY_LOGGERS = (
     "urllib3",
 )
 _HANDLER_FLAG = "_virtual_life_handler"
+_RING_FLAG = "_virtual_life_ring_handler"
 _REQUEST_ID = ContextVar("virtual_life_request_id", default=None)
 _SAFE_REQUEST_ID = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 _CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]")
 _PREVIOUS_LEVELS: dict[str, int] | None = None
+_FLOW_LOG_BUFFER: FlowLogBuffer | None = None
 
 
 def current_request_id() -> str | None:
@@ -156,7 +159,7 @@ def _set_level(name: str, value: int) -> None:
 def _remove_handlers() -> None:
     root = logging.getLogger()
     for handler in tuple(root.handlers):
-        if getattr(handler, _HANDLER_FLAG, False):
+        if getattr(handler, _HANDLER_FLAG, False) or getattr(handler, _RING_FLAG, False):
             root.removeHandler(handler)
             handler.close()
 
@@ -268,6 +271,97 @@ def reset_logging() -> None:
     for name, previous in (_PREVIOUS_LEVELS or {}).items():
         logging.getLogger("" if name == "root" else name).setLevel(previous)
     _PREVIOUS_LEVELS = None
+
+
+class FlowLogBuffer:
+    """A bounded in-memory ring of formatted log lines for the WebUI.
+
+    Every record reaching the root logger (after the console/file handlers) is
+    also appended here, so the browser can tail logs without touching the
+    rotating file. The buffer is a simple deque: new entries push from the
+    right, and reading with ``after_sequence`` returns strictly newer entries
+    up to a page limit. Sequences are monotonic and never reused; old entries
+    fall off and readers resync by following ``next_sequence``.
+    """
+
+    def __init__(self, capacity: int = 2000):
+        self.capacity = max(64, int(capacity))
+        self._entries: list[dict] = []
+        self._sequence = 0
+        self._lock = threading.Lock()
+
+    def append(self, record: logging.LogRecord) -> None:
+        formatter = _RuntimeFormatter(color=False, full_date=True)
+        line = formatter.format(record)
+        with self._lock:
+            self._sequence += 1
+            self._entries.append(
+                {
+                    "sequence": self._sequence,
+                    "timestamp": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(record.created))
+                    + f".{int(record.msecs):03d}",
+                    "level": _short_level(record.levelname),
+                    "logger": record.name,
+                    "request_id": getattr(record, "request_id", None),
+                    "message": record.getMessage(),
+                    "line": line,
+                }
+            )
+            if len(self._entries) > self.capacity:
+                del self._entries[: len(self._entries) - self.capacity]
+
+    def read(self, after_sequence: int = 0, limit: int = 200) -> dict:
+        if type(after_sequence) is not int or after_sequence < 0:
+            raise ValueError("after_sequence must be a nonnegative integer")
+        if type(limit) is not int or not 1 <= limit <= 500:
+            raise ValueError("limit must be an integer between 1 and 500")
+        with self._lock:
+            items = [entry for entry in self._entries if entry["sequence"] > after_sequence]
+            if len(items) > limit:
+                items = items[-limit:]
+            return {
+                "items": items,
+                "next_sequence": items[-1]["sequence"] if items else after_sequence,
+                "has_more": any(
+                    entry["sequence"] > items[-1]["sequence"] for entry in self._entries
+                )
+                if items
+                else False,
+            }
+
+
+class _FlowLogHandler(logging.Handler):
+    """A root handler that mirrors records into a FlowLogBuffer."""
+
+    def __init__(self, buffer: FlowLogBuffer):
+        super().__init__()
+        self.buffer = buffer
+        self.setLevel(logging.DEBUG)
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            self.buffer.append(record)
+        except Exception:
+            self.handleError(record)
+
+
+def _install_ring_handler(buffer: FlowLogBuffer) -> None:
+    """Add a ring handler if one is not already attached; idempotent."""
+    for handler in logging.getLogger().handlers:
+        if getattr(handler, _RING_FLAG, False):
+            return
+    handler = _FlowLogHandler(buffer)
+    setattr(handler, _RING_FLAG, True)
+    logging.getLogger().addHandler(handler)
+
+
+def get_flow_log_buffer() -> FlowLogBuffer:
+    """Return the shared ring buffer, creating and installing it on demand."""
+    global _FLOW_LOG_BUFFER
+    if _FLOW_LOG_BUFFER is None:
+        _FLOW_LOG_BUFFER = FlowLogBuffer()
+        _install_ring_handler(_FLOW_LOG_BUFFER)
+    return _FLOW_LOG_BUFFER
 
 
 def _clean(value: str) -> str:

@@ -388,3 +388,48 @@ def test_preview_rejects_a_blank_user_message(client):
         json={"user_message": "hi", "history": [{"role": "user", "content": "  "}]},
     )
     assert blank_history.status_code == 422, blank_history.text
+
+
+def test_erase_companion_memory_endpoint(client):
+    setup_nodes(client)
+    source = companion_source(client)
+    created = client.post(
+        "/v1/companions/sui/memories",
+        json={
+            "command_id": "erase-seed",
+            "kind": "fact",
+            "content": "生日是11月3日",
+            "semantic_key": "user.birthday",
+            "source_event_id": source,
+            "confirmed": True,
+            "importance": 0.9,
+        },
+    )
+    assert created.status_code == 201, created.text
+    assert client.get("/v1/companions/sui/memories").json()["total"] == 1
+    erased = client.delete("/v1/companions/sui/memory", params={"command_id": "erase-now"})
+    assert erased.status_code == 200, erased.text
+    assert erased.json()["erased"] is True
+    assert client.get("/v1/companions/sui/memories").json()["total"] == 0
+    # Replay of the same command_id is idempotent.
+    replay = client.delete("/v1/companions/sui/memory", params={"command_id": "erase-now"})
+    assert replay.status_code == 200 and replay.json()["erased"] is True
+    # Unknown companion still 404 via the coordinator guard.
+    assert (
+        client.delete("/v1/companions/missing/memory", params={"command_id": "erase-x"}).status_code
+        == 404
+    )
+
+
+def test_flow_logs_require_auth_and_ring_captures_lines(client):
+    assert client.get("/v1/flow/logs", headers={"Authorization": ""}).status_code == 401
+    page = client.get("/v1/flow/logs?after_sequence=0&limit=5").json()
+    assert page["next_sequence"] == 0 and page["items"] == []
+
+
+def test_flow_logs_validate_cursor_and_limit(client):
+    assert client.get("/v1/flow/logs?after_sequence=-1").status_code == 422
+    assert client.get("/v1/flow/logs?limit=0").status_code == 422
+    assert client.get("/v1/flow/logs?limit=501").status_code == 422
+    page = client.get("/v1/flow/logs?after_sequence=0&limit=200").json()
+    assert isinstance(page["items"], list)

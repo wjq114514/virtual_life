@@ -5,6 +5,7 @@ import hashlib
 import hmac
 import json
 import logging
+import time
 from collections.abc import Callable, Sequence
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
@@ -18,11 +19,17 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 
-from . import __version__
+from . import __version__, webui_session
 from .auto_memory import AutoMemoryService, GraphAliasUpdate
 from .coordinator import OUTPUT_CAPABILITIES, Coordinator, DomainError, RoutingPolicy
 from .delegation import DelegationExecutor, DelegationService
-from .dialogue import DialogueError, DialogueRequest, DialogueResult, DialogueService
+from .dialogue import (
+    DialogueCommitRequest,
+    DialogueError,
+    DialogueRequest,
+    DialogueResult,
+    DialogueService,
+)
 from .dialogue_stream import stream_response
 from .dist_api import build_dist_router
 from .embedding_memory import EmbeddingMemoryService
@@ -52,7 +59,7 @@ from .linux_deployment import (
     SSHSession,
     probe_host_key,
 )
-from .log import RequestLogMiddleware
+from .log import RequestLogMiddleware, get_flow_log_buffer
 from .memory import (
     MemoryCorrection,
     MemoryError,
@@ -75,6 +82,7 @@ from .models import (
     NodeHeartbeat,
     NodeRegister,
     ObservationCreate,
+    RoomFollow,
     TransferAck,
     TransferPrepare,
     WebAccessHeartbeat,
@@ -130,6 +138,7 @@ from .responses import (
     CompanionSnapshot,
     DialogueHistoryPage,
     EventPage,
+    FlowLogPage,
     GraphSnapshot,
     KnowledgeGraphEntity,
     KnowledgeGraphSnapshot,
@@ -269,6 +278,17 @@ class MemoryEmbeddingRun(BaseModel):
     limit: int | None = Field(default=None, ge=1, le=64)
 
 
+class WebUISessionCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    token: str = Field(min_length=1, max_length=512)
+
+
+class WebUISessionStatus(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    active: bool
+    expires_at: str | None = None
+
+
 def create_app(
     settings: Settings | None = None,
     *,
@@ -301,6 +321,8 @@ def create_app(
         lease_ttl_seconds=settings.lease_ttl_seconds,
         transfer_ttl_seconds=settings.transfer_ttl_seconds,
         routing_policy=routing_policy,
+        auto_follow_rooms=settings.auto_follow_rooms,
+        auto_follow_quiet_seconds=settings.auto_follow_quiet_seconds,
     )
     node_credentials = NodeCredentialService(coordinator)
     presentations = PresentationService(coordinator)
@@ -442,6 +464,19 @@ def create_app(
         schedule_policy=settings.proactive_schedule,
     )
     proactivity_output = ProactivityOutputService(proactivity)
+    # Birthday facts extracted by automatic memory schedule a durable reminder
+    # through the same channel a model reminder uses, so delivery honours the
+    # quiet, attention, budget, lease and cooldown gates.
+    automatic_memory.birthday_reminder = (
+        lambda companion_id, command_id, title, details, delay_seconds: proactivity.schedule_task(
+            companion_id,
+            command_id,
+            "birthday",
+            title,
+            details,
+            delay_seconds,
+        )
+    )
     delegation = DelegationService(
         coordinator,
         config=settings.delegation,
@@ -492,6 +527,32 @@ def create_app(
     def token_matches(candidate: str) -> bool:
         return hmac.compare_digest(candidate.encode("utf-8"), settings.api_token.encode("utf-8"))
 
+    def webui_session_expiry() -> int:
+        return int(time.time()) + int(settings.webui_session_days * webui_session.SECONDS_PER_DAY)
+
+    def remember_webui_session(response: Response, request: Request, expires_at: int) -> None:
+        # HttpOnly keeps the token out of JavaScript; SameSite=Strict keeps it out
+        # of cross-site requests, so the browser is the only place it ever lives.
+        response.set_cookie(
+            webui_session.COOKIE_NAME,
+            value=webui_session.sign_session_cookie(settings.api_token, expires_at),
+            max_age=max(expires_at - int(time.time()), 1),
+            expires=datetime.fromtimestamp(expires_at, UTC),
+            httponly=True,
+            secure=request.url.scheme == "https",
+            samesite="strict",
+            path="/",
+        )
+
+    def forget_webui_session(response: Response, request: Request) -> None:
+        response.delete_cookie(
+            webui_session.COOKIE_NAME,
+            httponly=True,
+            secure=request.url.scheme == "https",
+            samesite="strict",
+            path="/",
+        )
+
     async def authorize(
         request: Request,
         credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer)],
@@ -513,6 +574,22 @@ def create_app(
                 with node_credentials.mutation_guard(token, request.method, request.url.path, body):
                     yield
                 return
+        # The WebUI keeps the administrative token in an HttpOnly session cookie so a
+        # reload does not ask for it again. The cookie is only consulted when the
+        # request presents no bearer credential text: a wrong one is a 401, never a
+        # fallback to a remembered token. A zero lifetime disables this even for
+        # cookies minted before the setting changed.
+        authorization = request.headers.get("authorization", "")
+        presented = authorization.rsplit(" ", 1)[-1].strip() if authorization else ""
+        if (
+            settings.webui_session_days > 0
+            and not presented
+            and webui_session.verify_session_cookie(
+                settings.api_token, request.cookies.get(webui_session.COOKIE_NAME, "")
+            )
+        ):
+            yield
+            return
         raise DomainError(401, "unauthorized", "A valid runtime bearer token is required")
 
     async def reconciliation_loop() -> None:
@@ -529,6 +606,14 @@ def create_app(
                 await asyncio.to_thread(automatic_memory.process_next)
             except Exception:
                 logger.exception("Automatic memory processing failed")
+            # Sweep derivatives whose sources are no longer live so the table
+            # does not accumulate rows that recall already hides. Stale
+            # summaries are rebuilt from their surviving sources rather than
+            # only deleted; relations are simply dropped.
+            try:
+                await asyncio.to_thread(automatic_memory.prune_derivatives, limit=500, rebuild=True)
+            except Exception:
+                logger.exception("Automatic memory derivative pruning failed")
             try:
                 await asyncio.wait_for(stop.wait(), timeout=settings.auto_memory_poll_seconds)
             except TimeoutError:
@@ -804,6 +889,29 @@ def create_app(
     @app.get("/healthz", tags=["runtime"])
     def health() -> dict:
         return {"status": "ok", "version": __version__, "protocol_version": "1.0"}
+
+    @app.post("/v1/session", response_model=WebUISessionStatus, tags=["runtime"])
+    def create_webui_session(
+        request: Request, response: Response, body: WebUISessionCreate
+    ) -> WebUISessionStatus:
+        """Remember the administrative token in an HttpOnly session cookie."""
+        if settings.webui_session_days <= 0:
+            raise DomainError(
+                503, "session_disabled", "Session cookies are disabled on this runtime"
+            )
+        if not token_matches(body.token):
+            raise DomainError(401, "unauthorized", "A valid runtime bearer token is required")
+        expires_at = webui_session_expiry()
+        remember_webui_session(response, request, expires_at)
+        return WebUISessionStatus(
+            active=True, expires_at=datetime.fromtimestamp(expires_at, UTC).isoformat()
+        )
+
+    @app.delete("/v1/session", response_model=WebUISessionStatus, tags=["runtime"])
+    def delete_webui_session(request: Request, response: Response) -> WebUISessionStatus:
+        """Forget the token for this browser."""
+        forget_webui_session(response, request)
+        return WebUISessionStatus(active=False)
 
     @router.get("/capabilities", tags=["runtime"])
     def capabilities() -> dict:
@@ -1582,6 +1690,20 @@ def create_app(
         return dialogue.get_result(companion_id, command_id)
 
     @router.post(
+        "/companions/{companion_id}/dialogue/{command_id}/commit",
+        response_model=DialogueResult,
+        tags=["dialogue"],
+    )
+    def commit_dialogue(companion_id: str, command_id: str, body: DialogueCommitRequest):
+        """Commit an externally generated reply to a turn parked by the runtime.
+
+        `generator: "external"` on the dialogue route returns the assembled
+        prompt without calling a model; this route writes the reply back under
+        the same context, reference, emotion, and memory gates.
+        """
+        return dialogue.commit_turn(companion_id, command_id, body.model_dump(mode="json"))
+
+    @router.post(
         "/companions/{companion_id}/transfers",
         response_model=TransferSnapshot,
         status_code=201,
@@ -1602,6 +1724,19 @@ def create_app(
     def abort_transfer(transfer_id: str):
         return coordinator.abort_transfer(transfer_id)
 
+    @router.post(
+        "/companions/{companion_id}/follow",
+        response_model=CompanionSnapshot,
+        tags=["travel"],
+    )
+    def follow_room(companion_id: str, body: RoomFollow):
+        """Move the lifeform to the room that just reported activity.
+
+        Single-party authoritative migration: no target handshake is required.
+        The abandoned room becomes `room_state: "empty"` but keeps its tools.
+        """
+        return coordinator.follow_room(companion_id, body.model_dump(mode="json"))
+
     @router.post("/companions/{companion_id}/lease", response_model=OutputLease, tags=["travel"])
     def renew_lease(companion_id: str, body: LeaseRenew):
         return coordinator.renew_lease(companion_id, body.model_dump(mode="json"))
@@ -1615,6 +1750,14 @@ def create_app(
         if node_id is not None:
             coordinator.get_node(node_id)
         return coordinator.events(after_sequence=after_sequence, node_id=node_id, limit=limit)
+
+    @router.get("/flow/logs", response_model=FlowLogPage, tags=["flow"])
+    def flow_logs(
+        after_sequence: Annotated[int, Query(ge=0, le=2**63 - 1)] = 0,
+        limit: Annotated[int, Query(ge=1, le=500)] = 200,
+    ):
+        """Tail the in-memory live log ring for the WebUI (AstrBot-style)."""
+        return get_flow_log_buffer().read(after_sequence=after_sequence, limit=limit)
 
     @router.post(
         "/companions/{companion_id}/memories",
@@ -1796,6 +1939,11 @@ def create_app(
     def delete_memory(companion_id: str, memory_id: str):
         coordinator.get_companion(companion_id)
         return memory.delete(companion_id, memory_id)
+
+    @router.delete("/companions/{companion_id}/memory", tags=["memory"])
+    def erase_companion_memory(companion_id: str, command_id: str):
+        coordinator.get_companion(companion_id)
+        return memory.erase_companion(companion_id, command_id)
 
     @router.get("/memory/policy", tags=["memory"])
     def memory_policy():
