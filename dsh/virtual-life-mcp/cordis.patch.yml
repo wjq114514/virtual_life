@@ -1,0 +1,21 @@
+# Expose the Virtual Life companion runtime as MCP tools.
+#
+# The bridge at 127.0.0.1:8039 is generated from the runtime's own OpenAPI
+# document, so the advertised tool surface cannot drift from the runtime it
+# fronts. Tools arrive as mcp__virtual_life__<tool>.
+- insert:
+    - id: virtual-life-mcp
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: virtual_life
+        transport: streamable-http
+        url: http://127.0.0.1:8039/mcp
+        # The local Qwen model can take several minutes for one dialogue turn.
+        toolCallTimeoutMs: 300000
+        maxInstructionBytes: 16384
+        failOnStartupError: true
+        reconnect:
+          enabled: true
+          initialDelayMs: 1000
+          maxDelayMs: 30000
+          maxAttempts: 20

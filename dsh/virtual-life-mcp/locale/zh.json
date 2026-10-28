@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Virtual Life 陪伴运行时",
+    "description": "把 Virtual Life 运行时桥接为 MCP 工具：同伴、记忆召回、人格预览、对话、屏幕与语音会话、设备节点归属。工具由运行时自身的 OpenAPI 契约生成。"
+  }
+}

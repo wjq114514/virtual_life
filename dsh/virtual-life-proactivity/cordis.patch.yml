@@ -1,0 +1,29 @@
+# Proactive-participation driver for the Virtual Life companion runtime.
+#
+# The runtime generates proactive candidates itself (attention boundaries and
+# inner activity); this plugin polls the output channel and delivers each ready
+# message as a scheduled independent turn in the bound DSH session. Two tools
+# (virtual_life_proactivity_status / _deliver) let the model inspect and drive
+# the same path on demand.
+- insert:
+    - id: virtual-life-proactivity
+      name: '@virtuallife/dsh-virtual-life-proactivity'
+      config:
+        baseUrl: http://127.0.0.1:8038
+        token: local-dev-token
+        # The demo device node is a simulation; keep it alive so its output
+        # lease can be renewed. A real device node heartbeats itself.
+        keepNodeAlive: true
+        poller:
+          enabled: true
+          intervalMs: 6000
+          maxPerPoll: 5
+        delivery:
+          title: 虚拟伙伴主动参与
+          promptPrefix: 虚拟伙伴主动想说话：
+          delaySeconds: 1
+        sessions:
+          - sessionId: session-9cb72bcb-0ab3-4b47-ad52-53de361bad82
+            companionId: proact-demo
+            nodeId: proact-node
+            accessId: proact-access-3

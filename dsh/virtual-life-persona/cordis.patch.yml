@@ -1,0 +1,15 @@
+# Virtual Life companion persona + context bridge.
+#
+# Refreshes the companion's personality/state/slow-variables/inner-activity from
+# the runtime and injects a compact, bounded snapshot as a labeled dynamic
+# context block into the DSH system prompt. The block is data, not instructions.
+- insert:
+    - id: virtual-life-persona
+      name: '@virtuallife/dsh-virtual-life-persona'
+      config:
+        baseUrl: http://127.0.0.1:8038
+        token: local-dev-token
+        companionId: proact-demo
+        refreshMs: 30000
+        maxContextChars: 4000
+        order: 220

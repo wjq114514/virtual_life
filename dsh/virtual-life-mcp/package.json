@@ -1,0 +1,12 @@
+{
+  "name": "@virtuallife/dsh-virtual-life-mcp",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "exports": { "./locale/*.json": "./locale/*.json", "./icon": "./icon.svg" },
+  "files": ["cordis.patch.yml", "locale/*.json", "icon.svg"],
+  "dependencies": {
+    "@deepseek-ai/dsh-mcp-client": "0.2.1-rc.3"
+  },
+  "dsh": { "bundle": { "patch": "./cordis.patch.yml" } }
+}
