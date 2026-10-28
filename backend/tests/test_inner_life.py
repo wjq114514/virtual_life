@@ -24,6 +24,7 @@ class Provider:
             "urge": 0.5,
             "confidence": 0.9,
             "rationale": "对话与低唤醒状态显示她更想安静地在意，而不是追问。",
+            "content": "刚才那阵安静之后，我有点想确认你还好，但不敢打扰你。",
         }
 
     def complete(self, request):
@@ -337,6 +338,7 @@ def test_model_assisted_judge_records_bounded_audit(model_runtime):
     assert current["model"]["input_tokens"] == 120
     assert current["model"]["output_tokens"] == 30
     assert current["model"]["rationale"].startswith("对话与低唤醒")
+    assert current["content"] == provider.judge["content"]
     assert client.get("/v1/companions/sui/inner-life/activities").json()["items"][0] == current
     preview = client.post(
         "/v1/companions/sui/personality/preview", json={"user_message": "继续吧"}
@@ -393,6 +395,27 @@ def test_model_judge_low_confidence_falls_back_to_rules(model_runtime):
     current = client.get("/v1/companions/sui/inner-life").json()["current"]
     assert current["generator"] == "rules_v1"
     assert current["model"] is None
+
+
+def test_model_judge_without_content_falls_back_to_template(model_runtime):
+    client, app, clock, provider, state = model_runtime
+    provider.judge = {
+        "kind": "concerned",
+        "salience": 0.6,
+        "urge": 0.5,
+        "confidence": 0.9,
+        "rationale": "no content offered",
+    }
+    send(client, state, "one", "谢谢你陪我读书")
+    provider.requests.clear()
+    clock.value += timedelta(minutes=20)
+    observe(client, clock)
+    assert app.state.inner_life.tick() == 1
+    current = client.get("/v1/companions/sui/inner-life").json()["current"]
+    assert current["generator"] == "model_v1"
+    # Model declined content; the template fallback kicked in.
+    assert current["content"] != provider.judge["rationale"]
+    assert isinstance(current["content"], str) and current["content"].strip()
 
 
 def test_model_interval_keeps_local_rules_between_calls(model_runtime):

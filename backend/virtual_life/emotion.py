@@ -21,6 +21,12 @@ class EmotionPolicy(RequestModel):
     arousal_half_life_seconds: int | None = Field(default=None, ge=60, le=7200)
     control_half_life_seconds: int | None = Field(default=None, ge=60, le=7200)
     resource_half_life_seconds: int | None = Field(default=None, ge=60, le=7200)
+    # Negative emotions (concern/sympathy/annoyance) decay slower than positive
+    # ones, reflecting negativity bias (Baumeister 2001) and the asymmetric
+    # decay used by WASABI (Becker-Asano 2008). When set, these reactions use
+    # this half-life instead of the shared base; per-dimension overrides still
+    # win when explicitly configured.
+    negative_half_life_seconds: int | None = Field(default=None, ge=60, le=7200)
     candidate_limit: int = Field(default=256, ge=1, le=2048)
     resonance_strength: float = Field(default=0.2, ge=0, le=0.3)
 
@@ -39,7 +45,19 @@ class AffectDelta(RequestModel):
     social_battery: float = Field(default=0, ge=-0.3, le=0.3)
 
 
-Reaction = Literal["neutral", "joy", "concern", "curiosity", "quiet"]
+Reaction = Literal[
+    "neutral",
+    "joy",
+    "concern",
+    "curiosity",
+    "quiet",
+    "amusement",
+    "excitement",
+    "surprise",
+    "sympathy",
+    "annoyance",
+    "pride",
+]
 Reason = Literal[
     "no_explicit_cue",
     "explicit_appreciation",
@@ -47,6 +65,11 @@ Reason = Literal[
     "explicit_question",
     "quiet_request",
 ]
+
+# Reactions whose experiences decay more slowly when negative_half_life_seconds
+# is configured. Concern and sympathy are empathetic-distress reactions; annoyance
+# is irritability. Together these capture the negativity-bias asymmetry.
+_NEGATIVE_REACTIONS = frozenset({"concern", "sympathy", "annoyance"})
 
 
 class RecoveryHalfLives(RequestModel):
@@ -423,6 +446,20 @@ class EmotionService:
         validity, active, reaction = [], 0, "neutral"
         quiet = False
         half_lives = self._half_lives()
+        # Negative reactions persist longer (negativity bias). Per-dimension
+        # overrides, when explicitly configured, still win over the reaction
+        # adjustment; only otherwise-defaulted dimensions are slowed.
+        negative = self.policy.negative_half_life_seconds
+        explicit = {
+            key: getattr(self.policy, f"{dimension}_half_life_seconds") is not None
+            for key, dimension in (
+                ("valence", "valence"),
+                ("arousal", "arousal"),
+                ("control", "control"),
+                ("energy", "resource"),
+                ("social_battery", "resource"),
+            )
+        }
         for row in rows:
             live = self._base_live(connection, row)
             resonance = json.loads(row["resonance_json"]) if row["resonance_json"] else None
@@ -439,7 +476,16 @@ class EmotionService:
             if elapsed > max(half_lives.values()) * 24:
                 continue
             active += 1
-            factors = {key: 2 ** (-elapsed / value) for key, value in half_lives.items()}
+            slow = (
+                negative
+                if negative is not None and appraisal["reaction"] in _NEGATIVE_REACTIONS
+                else None
+            )
+            factors = {
+                key: 2
+                ** (-elapsed / (negative if slow is not None and not explicit[key] else value))
+                for key, value in half_lives.items()
+            }
             factor = 2 ** (-elapsed / self.policy.half_life_seconds)
             for key in total:
                 total[key] += factors[key] * (
@@ -468,6 +514,12 @@ class EmotionService:
                 "joy": "cheerful",
                 "concern": "concerned",
                 "curiosity": "curious",
+                "amusement": "amused",
+                "excitement": "excited",
+                "surprise": "surprised",
+                "sympathy": "sympathetic",
+                "annoyance": "annoyed",
+                "pride": "proud",
             }.get(reaction, "calm")
         effective.update(energy=total["energy"], social_battery=total["social_battery"])
         if reaction == "quiet":

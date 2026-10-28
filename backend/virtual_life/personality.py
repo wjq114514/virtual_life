@@ -257,7 +257,19 @@ class PersonalityCardImport(_BoundedModel):
 
 
 class PersonalityState(RequestModel):
-    mood: Literal["calm", "cheerful", "curious", "concerned", "tired"] = "calm"
+    mood: Literal[
+        "calm",
+        "cheerful",
+        "curious",
+        "concerned",
+        "tired",
+        "amused",
+        "excited",
+        "surprised",
+        "sympathetic",
+        "annoyed",
+        "proud",
+    ] = "calm"
     energy: float = Field(default=0.8, ge=0, le=1)
     social_battery: float = Field(default=0.7, ge=0, le=1)
 

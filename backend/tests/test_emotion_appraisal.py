@@ -42,6 +42,38 @@ def test_complex_or_unattributed_text_stays_neutral(message):
     assert all(value == 0 for value in result["delta"].values())
 
 
+@pytest.mark.parametrize(
+    "message,expect",
+    [
+        ("谢谢你的陪伴", "joy"),
+        ("多亏你", "joy"),
+        ("有你在真好", "joy"),
+        ("感谢你的陪伴", "joy"),
+        ("谢谢你的倾听", "joy"),
+        ("谢谢你听我说话", "joy"),
+        ("Thanks for reading with me so much", "joy"),
+        ("i'm grateful", "joy"),
+        ("请保持安静", "quiet"),
+        ("让我静一静", "quiet"),
+        ("别出声", "quiet"),
+        ("别打扰我", "quiet"),
+        ("我挺累", "concern"),
+        ("我蛮难过", "concern"),
+        ("我有点低落", "concern"),
+        ("我有点郁闷", "concern"),
+        ("心里堵", "concern"),
+        ("我想哭", "concern"),
+        ("我想知道下", "curiosity"),
+        ("我想了解一下", "curiosity"),
+        ("帮我看看", "curiosity"),
+        ("让我们一起聊聊", "curiosity"),
+        ("我超想看这个", "curiosity"),
+    ],
+)
+def test_expanded_synonyms_and_forms_are_recognised(message, expect):
+    assert appraise(message, TRAITS)["reaction"] == expect
+
+
 @pytest.mark.parametrize("message", ["我最近有点难过", "我现在非常难过", "我特别焦虑"])
 def test_explicit_self_expression_has_bounded_vector_and_no_resource_charge(message):
     result = appraise(message, TRAITS)

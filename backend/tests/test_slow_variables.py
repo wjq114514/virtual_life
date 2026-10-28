@@ -110,7 +110,12 @@ def test_positive_evidence_is_warm_and_raises_engagement(tmp_path):
         result = preview(client)
         assert "SLOW_VARIABLES_DATA" in result["context_text"]
         assert result["slow_variables"]["engagement"] == snapshot["engagement"]
-        expected = min(8, max(1, round(2 * (0.5 + snapshot["engagement"]))))
+        # Positive evidence yields a cheerful mood, which adds one sentence on
+        # top of the engagement-scaled style baseline.
+        assert result["emotion"]["effective_state"]["mood"] == "cheerful"
+        assert result["participation"]["tone"] == "warm"
+        base = min(8, max(1, round(2 * (0.5 + snapshot["engagement"]))))
+        expected = min(8, max(1, base + 1))
         assert result["participation"]["max_reply_sentences"] == expected
 
 
