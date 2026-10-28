@@ -24,6 +24,8 @@ REQUIRED_WHEEL_ENTRIES = {
     "virtual_life_linux/__init__.py",
     "virtual_life_linux/cli.py",
     "virtual_life_linux/daemon.py",
+    "virtual_life_linux/dist_client.py",
+    "virtual_life_linux/installer.py",
     "virtual_life_linux/integrations/systemd/virtual-life-linux.service",
     "virtual_life_linux/integrations/fish/conf.d/virtual-life.fish",
     "virtual_life_linux/integrations/fish/completions/vl.fish",
@@ -55,6 +57,20 @@ def missing_entries(wheel: Path) -> set[str]:
     return REQUIRED_WHEEL_ENTRIES - names
 
 
+def write_checksums(artifacts: list[Path]) -> Path:
+    """Write SHA256SUMS so a downloaded wheel can be verified before install."""
+    lines = []
+    for artifact in sorted(artifacts, key=lambda path: path.name):
+        if artifact.name.startswith(".") or artifact.is_dir():
+            continue
+        if artifact.name == "SHA256SUMS":
+            continue
+        lines.append(f"{hashlib.sha256(artifact.read_bytes()).hexdigest()}  {artifact.name}")
+    path = DIST / "SHA256SUMS"
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return path
+
+
 def main() -> int:
     artifacts = build()
     wheels = [path for path in artifacts if path.suffix == ".whl"]
@@ -68,11 +84,17 @@ def main() -> int:
             for entry in sorted(missing):
                 print(f"  {entry}", file=sys.stderr)
             return 1
+    checksums = write_checksums(artifacts)
     for artifact in artifacts:
         if artifact.name.startswith(".") or artifact.is_dir():
             continue
         digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
         print(f"{artifact.name}  sha256={digest}")
+    print(
+        f"wrote {checksums} "
+        f"({len(checksums.read_text(encoding='utf-8').splitlines())} entries); "
+        "upload it next to the wheel for GitHub releases"
+    )
     return 0
 
 

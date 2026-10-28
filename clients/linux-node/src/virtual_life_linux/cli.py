@@ -8,6 +8,7 @@ import contextlib
 import getpass
 import json
 import os
+import shutil
 import socket
 import sys
 import tempfile
@@ -100,7 +101,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     setup = sub.add_parser(
         "setup",
-        help="fetch the latest client from the server, then install config, assets and the service",
+        help="fetch the latest client from the server or GitHub, then install config, assets and the service",
     )
     setup.add_argument(
         "--server", default=None, help="runtime URL, also used as the download source"
@@ -112,6 +113,21 @@ def build_parser() -> argparse.ArgumentParser:
     )
     setup.add_argument("--version", default=None, help="package version, or 'latest'")
     setup.add_argument("--wheel", type=Path, default=None, help="install this local wheel instead")
+    setup.add_argument(
+        "--github",
+        default=None,
+        help="owner/repo whose GitHub releases publish the client",
+    )
+    setup.add_argument(
+        "--github-token",
+        default=None,
+        help="token for private repositories (defaults to GITHUB_TOKEN)",
+    )
+    setup.add_argument(
+        "--github-api",
+        default=None,
+        help="GitHub API base (defaults to https://api.github.com, or VIRTUAL_LIFE_LINUX_GITHUB_API)",
+    )
     setup.add_argument("--token", default=None, help="runtime bearer token")
     setup.add_argument("--token-file", type=Path, default=None, help="read the token from a file")
     setup.add_argument("--node-id", default=None)
@@ -476,6 +492,28 @@ def _setup_token(args: argparse.Namespace, config_dir: Path) -> str | None:
     return None
 
 
+def _github_api_base(args: argparse.Namespace) -> str:
+    """The GitHub API root; overridable for self-hosted GitHub Enterprise."""
+    from . import dist_client
+
+    if args.github_api:
+        return args.github_api
+    return os.environ.get("VIRTUAL_LIFE_LINUX_GITHUB_API") or dist_client.GITHUB_API_BASE
+
+
+def _github_token(args: argparse.Namespace) -> str | None:
+    """Resolve a GitHub token without ever printing it.
+
+    Separate from the runtime token: a runtime bearer token is not a GitHub
+    credential, and a GitHub token must not be written into the client config.
+    """
+    if args.github_token:
+        return args.github_token.strip()
+    if os.environ.get("GITHUB_TOKEN"):
+        return os.environ["GITHUB_TOKEN"].strip()
+    return None
+
+
 def _setup_prompt(question: str, default: str | None = None) -> str | None:
     if not sys.stdin.isatty():
         return default
@@ -510,25 +548,55 @@ def _run_setup(args: argparse.Namespace) -> int:
     report: dict = {"steps": notes, "config_dir": str(config_dir), "dry_run": args.dry_run}
 
     token = _setup_token(args, config_dir)
-    source = args.dist_url or args.server
     wheel = args.wheel
+    download_dir: Path | None = None
 
-    if wheel is None and source:
-        manifest = asyncio.run(dist_client.fetch_manifest(source, token))
-        package = manifest.select(args.version)
-        report["packages"] = [item.version for item in manifest.packages]
-        report["version"] = package.version
-        notes.append(f"selected: {package.version} ({package.wheel})")
-        destination = Path(tempfile.mkdtemp(prefix="virtual-life-setup-")) / package.wheel
-        asyncio.run(dist_client.download_package(source, package, destination, token))
-        wheel = destination
-    elif wheel is not None:
-        notes.append(f"using local wheel: {wheel}")
-    else:
-        notes.append("no download source given; keeping the installed package")
+    try:
+        if wheel is None and args.github:
+            # GitHub releases publish their own download URLs, so the source root is
+            # irrelevant here and the runtime token is never used for them.
+            repo = dist_client.github_repo(args.github)
+            github_token = _github_token(args)
+            report["source"] = f"github:{repo}"
+            manifest = asyncio.run(
+                dist_client.github_manifest(repo, github_token, api_base=_github_api_base(args))
+            )
+            package = manifest.select(args.version)
+            report["packages"] = [item.version for item in manifest.packages]
+            report["version"] = package.version
+            notes.append(f"selected: {package.version} ({package.wheel}) from GitHub {repo}")
+            download_dir = Path(tempfile.mkdtemp(prefix="virtual-life-setup-"))
+            wheel = asyncio.run(
+                dist_client.download_package(
+                    "", package, download_dir / package.wheel, github_token
+                )
+            )
+        else:
+            source = args.dist_url or args.server
+            report["source"] = str(source) if source else "installed package"
+            if wheel is None and source:
+                manifest = asyncio.run(dist_client.fetch_manifest(source, token))
+                package = manifest.select(args.version)
+                report["packages"] = [item.version for item in manifest.packages]
+                report["version"] = package.version
+                notes.append(f"selected: {package.version} ({package.wheel})")
+                download_dir = Path(tempfile.mkdtemp(prefix="virtual-life-setup-"))
+                wheel = asyncio.run(
+                    dist_client.download_package(
+                        source, package, download_dir / package.wheel, token
+                    )
+                )
+            elif wheel is not None:
+                notes.append(f"using local wheel: {wheel}")
+            else:
+                notes.append("no download source given; keeping the installed package")
 
-    if wheel is not None:
-        notes.append(installer.install_python_package(wheel, dry_run=args.dry_run))
+        if wheel is not None:
+            notes.append(installer.install_python_package(wheel, dry_run=args.dry_run))
+    finally:
+        # The wheel is only consumed by the installer, so never leave it behind.
+        if download_dir is not None:
+            shutil.rmtree(download_dir, ignore_errors=True)
 
     if config_dir.joinpath("config.toml").exists() and not args.clobber:
         notes.append("config: kept (existing)")
@@ -542,7 +610,7 @@ def _run_setup(args: argparse.Namespace) -> int:
         if not node_id:
             raise installer_error("--node-id is required when stdin is not a terminal")
         label = args.label or node_id
-        device_id = args.device_id or installer.stable_device_id(config_dir)
+        device_id = args.device_id or installer.stable_device_id(config_dir, write=not args.dry_run)
         backend = args.backend or "niri"
         text = installer.render_config(
             server_url, node_id, device_id, label, backend=backend, attention_enabled=args.attention

@@ -1,0 +1,15 @@
+{
+  "server_url": "http://127.0.0.1:8038",
+  "token_env": "VIRTUAL_LIFE_API_TOKEN",
+  "node_id": "qq-room",
+  "label": "QQ 房间",
+  "websocket_url": "ws://127.0.0.1:6700",
+  "http_url": "http://127.0.0.1:3000",
+  "access_token": null,
+  "companions": ["sui"],
+  "test_user_id": 2563853921,
+  "interval_seconds": 30,
+  "request_timeout_seconds": 10,
+  "max_history": 6,
+  "max_output_tokens": 512
+}

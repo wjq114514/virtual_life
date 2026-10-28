@@ -48,15 +48,17 @@ def runtime_config_dir() -> Path:
     return config_home() / "virtual-life" / "linux"
 
 
-def stable_device_id(config_dir: Path) -> str:
-    """Persist one installation id so a reinstall keeps the same identity."""
+def stable_device_id(config_dir: Path, *, write: bool = True) -> str:
+    """Return the installation id, persisting it so a reinstall keeps the identity."""
     marker = config_dir / ".device-id"
     if marker.is_file():
         value = marker.read_text(encoding="utf-8").strip()
         if value:
             return value
-    config_dir.mkdir(parents=True, exist_ok=True)
     value = f"install-{uuid.uuid4().hex[:12]}"
+    if not write:
+        return value
+    config_dir.mkdir(parents=True, exist_ok=True)
     marker.write_text(value + "\n", encoding="utf-8")
     marker.chmod(CREDS_MODE)
     return value

@@ -2,6 +2,7 @@
 
 complete -c vl -f
 complete -c vl -n __fish_use_subcommand -a status -d "Show aggregated daemon state"
+complete -c vl -n __fish_use_subcommand -a setup -d "Fetch the latest client and install the runtime files"
 complete -c vl -n __fish_use_subcommand -a doctor -d "Report diagnostics"
 complete -c vl -n __fish_use_subcommand -a open -d "Open the Web UI for this node"
 complete -c vl -n __fish_use_subcommand -a web -d "Open the Web UI"
@@ -49,3 +50,21 @@ complete -c vl -n "__fish_seen_subcommand_from voice commit" -l release -f
 complete -c vl -n "__fish_seen_subcommand_from daemon" -a "run" -f
 complete -c vl -n "__fish_seen_subcommand_from doctor" -l json -f
 complete -c vl -n "__fish_seen_subcommand_from ask" -l stdin -f
+complete -c vl -n "__fish_seen_subcommand_from setup" -l server -r -f
+complete -c vl -n "__fish_seen_subcommand_from setup" -l dist-url -r -f
+complete -c vl -n "__fish_seen_subcommand_from setup" -l version -r -f
+complete -c vl -n "__fish_seen_subcommand_from setup" -l wheel -r -f
+complete -c vl -n "__fish_seen_subcommand_from setup" -l github -r -f
+complete -c vl -n "__fish_seen_subcommand_from setup" -l github-token -r -f
+complete -c vl -n "__fish_seen_subcommand_from setup" -l github-api -r -f
+complete -c vl -n "__fish_seen_subcommand_from setup" -l token -r -f
+complete -c vl -n "__fish_seen_subcommand_from setup" -l token-file -r -f
+complete -c vl -n "__fish_seen_subcommand_from setup" -l node-id -r -f
+complete -c vl -n "__fish_seen_subcommand_from setup" -l device-id -r -f
+complete -c vl -n "__fish_seen_subcommand_from setup" -l label -r -f
+complete -c vl -n "__fish_seen_subcommand_from setup" -l backend -a "niri none" -f
+complete -c vl -n "__fish_seen_subcommand_from setup" -l attention -f
+complete -c vl -n "__fish_seen_subcommand_from setup" -l no-systemd -f
+complete -c vl -n "__fish_seen_subcommand_from setup" -l clobber -f
+complete -c vl -n "__fish_seen_subcommand_from setup" -l dry-run -f
+complete -c vl -n "__fish_seen_subcommand_from setup" -l json -f

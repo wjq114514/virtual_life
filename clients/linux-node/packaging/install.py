@@ -41,9 +41,7 @@ def main(argv: list[str] | None = None) -> int:
                 example.read_text(encoding="utf-8"), dry_run=args.dry_run
             )
             print(f"config: {state}")
-        notes = installer.install_assets(
-            dry_run=args.dry_run, with_systemd=not args.no_systemd
-        )
+        notes = installer.install_assets(dry_run=args.dry_run, with_systemd=not args.no_systemd)
         for note in notes:
             print(note)
         if not args.no_systemd:

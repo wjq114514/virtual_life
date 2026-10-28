@@ -11,16 +11,18 @@ import time
 import uuid
 from pathlib import Path
 
-from .adapters import AttentionAdapter, collect_all
+from .adapters import AttentionAdapter, AttentionObservation, collect_all
 from .adapters.dms import DmsAdapter
 from .adapters.logind import LogindAdapter
 from .adapters.niri import NiriAdapter
+from .adapters.niri_scene import NiriSceneCollector
 from .adapters.niri_scene import from_desktop as scene_from_desktop
 from .capture import GrimCapture
 from .config import LinuxConfig
 from .ipc import IpcError, IpcServer, IpcSession
 from .lease import ClockUnavailable, LeaseGate
 from .policy import AttentionPolicy
+from .scene_classify import classify_activity, classify_focus
 from .screen_client import ScreenStreamer
 from .state import Renderer, build_node_context, build_status, now_iso
 from .storage import ClientStorage
@@ -68,6 +70,26 @@ class SingleInstanceLock:
             self._fd = None
 
 
+class _SceneObservationAdapter:
+    """Adapter that replays the latest scene-derived attention observation.
+
+    The daemon keeps a single observation built from the newest scene sample and
+    hands it back to the attention loop, so the activity/focus classification
+    flows into the attention sample without a second compositor query.
+    """
+
+    name = "scene"
+
+    def __init__(self, observation: AttentionObservation) -> None:
+        self.observation = observation
+
+    def available(self) -> bool:
+        return True
+
+    async def collect(self) -> list[AttentionObservation]:
+        return [self.observation]
+
+
 class LinuxDaemon:
     def __init__(
         self,
@@ -79,6 +101,7 @@ class LinuxDaemon:
         lease_gate: LeaseGate | None = None,
         generation: str | None = None,
         attention_source=None,
+        scene_collector: NiriSceneCollector | None = None,
     ):
         self.config = config
         self.storage = storage
@@ -87,12 +110,14 @@ class LinuxDaemon:
         self.lease_gate = lease_gate or LeaseGate()
         self.generation = generation or uuid.uuid4().hex
         self.attention_source = attention_source
+        self.scene_collector = scene_collector
         self.attention_policy = AttentionPolicy(ttl_seconds=config.reporting.attention_ttl_seconds)
         self.attention_session_id = self._attention_session_id()
         stored = self.storage.get(f"attention:{self.attention_session_id}", "0")
         self.attention_sequence = int(stored) if stored and stored.isdigit() else 0
         self._attention_last = ""
         self._pending_boundary: dict | None = None
+        self._scene_observation: AttentionObservation | None = None
 
         self.node: dict | None = None
         self.companions: list[dict] = []
@@ -302,6 +327,8 @@ class LinuxDaemon:
         adapters: list[AttentionAdapter] = [NiriAdapter(), LogindAdapter()]
         if self.config.desktop.dms_enabled:
             adapters.append(DmsAdapter())
+        if self._scene_observation is not None:
+            adapters.append(_SceneObservationAdapter(self._scene_observation))
         return adapters
 
     async def _attention_loop(self) -> None:
@@ -322,6 +349,9 @@ class LinuxDaemon:
         focus = "unknown"
         locked = None
         idle = None
+        has_window = False
+        app_id = ""
+        title = ""
         for observation in observations:
             data = observation.data or {}
             if observation.kind == "session":
@@ -331,6 +361,18 @@ class LinuxDaemon:
                     idle = bool(data["idle_hint"])
             elif observation.kind == "workspace" and data.get("workspace_id") is not None:
                 focus = "focused"
+            elif observation.kind == "scene":
+                if data.get("has_focused_window") is not None:
+                    has_window = bool(data["has_focused_window"])
+                if data.get("app_id"):
+                    app_id = str(data["app_id"])
+                if data.get("title"):
+                    title = str(data["title"])
+        if has_window:
+            focus = classify_focus(True)
+        activity = "unknown"
+        if app_id or title:
+            activity = classify_activity(app_id, title)
         if locked:
             availability = "busy"
             user_present = False
@@ -349,16 +391,41 @@ class LinuxDaemon:
             "sequence": 0,
             "sampled_at": now_iso(),
             "ttl_seconds": min(self.config.reporting.attention_ttl_seconds, 300),
-            "activity": "unknown",
+            "activity": activity,
             "focus": focus,
             "availability": availability,
             "user_present": user_present,
             "locked": locked,
-            "meeting": None,
+            "meeting": activity == "meeting" or None,
             "screen_sharing": None,
             "boundary": boundary.get("boundary") if boundary else "none",
             "boundary_id": boundary.get("boundary_id") if boundary else None,
         }
+
+    async def _refresh_scene_observation(self) -> None:
+        """Refresh the cached scene observation from the niri collector."""
+        if self.scene_collector is None:
+            return
+        try:
+            scene = await self.scene_collector.collect()
+        except Exception:  # noqa: BLE001 - a broken collector must not stop attention
+            return
+        focused = next(
+            (item for item in scene.windows if isinstance(item, dict) and item.get("is_focused")),
+            None,
+        )
+        has_window = focused is not None
+        app_id = str(focused.get("app_id") or "") if focused else ""
+        title = str(focused.get("title") or "") if focused else ""
+        self._scene_observation = AttentionObservation(
+            source="scene",
+            kind="scene",
+            data={
+                "has_focused_window": has_window,
+                "app_id": app_id,
+                "title": title,
+            },
+        )
 
     @staticmethod
     def _sample_content(sample: dict) -> dict:
@@ -368,6 +435,7 @@ class LinuxDaemon:
     async def _emit_attention_sample(self, boundary: dict | None = None) -> dict | None:
         """Send one bounded attention sample; return None when nothing changed."""
         candidate = boundary or self._pending_boundary
+        await self._refresh_scene_observation()
         observations = await collect_all(self._adapters())
         sample = self._attention_sample(observations, candidate)
         if _fingerprint(self._sample_content(sample)) == self._attention_last:
@@ -525,6 +593,7 @@ class LinuxDaemon:
             candidate = scene_from_desktop(self.config.desktop)
             if candidate.available():
                 scene_collector = candidate
+                self.scene_collector = candidate
         streamer = ScreenStreamer(
             self.transport,
             self.config.node_id,

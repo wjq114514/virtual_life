@@ -194,12 +194,8 @@ class ServerScreenController(
                     captureHeight = frame.height,
                     rotationDegrees = frame.rotationDegrees,
                 ),
-                clientFeatures = ClientFeatures(
-                    extractor = "average_hash",
-                    changeScore = changeScore,
-                    hashes = listOf(ClientHash("average_hash_64", hashHex(frame.fingerprint))),
-                ),
-                hostMetadata = hostMetadata(),
+                clientFeatures = clientFeatures(frame, changeScore),
+                hostMetadata = hostMetadata(frame),
             ),
         )
         status.value = "已接收帧 #$sequence"
@@ -255,9 +251,59 @@ class ServerScreenController(
         }
     }
 
-    private fun hostMetadata(): HostMetadata {
+    private fun clientFeatures(
+        frame: CapturedFrame,
+        changeScore: Double,
+    ): ClientFeatures {
+        val base = ClientFeatures(
+            extractor = "average_hash",
+            changeScore = changeScore,
+            hashes = listOf(ClientHash("average_hash_64", hashHex(frame.fingerprint))),
+        )
+        // Merge the cached accessibility scene (if any) without losing the hash.
+        val scene = AccessibilitySceneService.latest ?: return base
+        val uiElements = scene.clientFeatures?.get("ui_elements")
+        val mapped = (uiElements as? List<*>)
+            ?.filterIsInstance<Map<*, *>>()
+            ?.mapNotNull { item ->
+                val role = item["role"]?.toString() ?: return@mapNotNull null
+                val text = item["text"]?.toString() ?: ""
+                val bbox = (item["bbox"] as? List<*>)
+                    ?.mapNotNull { (it as? Number)?.toDouble() }
+                    ?.takeIf { it.size == 4 }
+                    ?: return@mapNotNull null
+                val id = item["element_id"]?.toString() ?: "a11y:${text.hashCode()}"
+                val conf = (item["confidence"] as? Number)?.toDouble()
+                dev.virtuallife.node.UiElement(
+                    elementId = id,
+                    role = role,
+                    text = text,
+                    bbox = bbox,
+                    confidence = conf,
+                )
+            }
+            ?.take(8)
+        return if (mapped.isNullOrEmpty()) {
+            base
+        } else {
+            base.copy(
+                extractor = "android_a11y",
+                uiElements = mapped,
+            )
+        }
+    }
+
+    private fun hostMetadata(frame: CapturedFrame): HostMetadata {
         val interactive = context.getSystemService(PowerManager::class.java)?.isInteractive ?: true
-        return HostMetadata(locked = !interactive, userPresent = interactive)
+        val scene = AccessibilitySceneService.latest
+        val appId = scene?.appId
+        val appClass = scene?.className
+        return HostMetadata(
+            locked = !interactive,
+            userPresent = interactive,
+            appId = appId,
+            appClass = appClass,
+        )
     }
 
     companion object {

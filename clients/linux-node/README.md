@@ -21,6 +21,8 @@ See [the frozen contract](../../docs/linux-client-contract.md) and the
 | `src/virtual_life_linux/ipc.py` | local Unix-socket IPC server and client |
 | `src/virtual_life_linux/daemon.py` | lifecycle, presentation, dialogue, travel, attention |
 | `src/virtual_life_linux/cli.py` | `vl` entry point |
+| `src/virtual_life_linux/installer.py` | per-user assets, config, credentials, service and the package install step |
+| `src/virtual_life_linux/dist_client.py` | distribution manifest fetch and sha256-verified wheel download |
 | `src/virtual_life_linux/tui/` | Textual renderer |
 | `src/virtual_life_linux/voice/` | daemon-owned capture, local ASR, turn state machine and fenced playback |
 | `src/virtual_life_linux/state.py`, `policy/` | aggregated state and attention overrides |
@@ -30,6 +32,7 @@ See [the frozen contract](../../docs/linux-client-contract.md) and the
 ## Usage
 
 ```fish
+vl setup --server http://127.0.0.1:8038   # fetch the latest client, then install
 vl doctor --json                 # diagnostics (no secrets)
 vl status                        # aggregated daemon state
 vl chat                          # open the terminal renderer
@@ -100,8 +103,64 @@ full-duplex is the first real validation path.
 
 ## Install
 
+If the runtime publishes a client build (`[dist]` on the server side), one
+command fetches the latest wheel, verifies its published sha256 and installs
+everything:
+
+```sh
+vl setup --server http://127.0.0.1:8038 --token <owner-token> --node-id <id>
+```
+
+`--dist-url` points at a `file://` or tokenless static location mirroring the
+same layout, `--wheel` installs a local build, `--version` selects one
+(precision match, otherwise `latest`), `--dry-run` prints the plan without
+writing anything, and `--json` gives a machine-readable result. The token comes
+from `--token`, `--token-file`, `VIRTUAL_LIFE_TOKEN` or the existing 0600
+credentials file; it is only prompted for on a terminal and is never printed or
+logged. Source precedence is `--wheel` > `--github` > `--dist-url` > `--server`.
+
+### From GitHub Releases, no server required
+
+If the build is published as a release asset instead, `--github` pulls it
+straight from the repository:
+
+```sh
+vl setup --github wjq114514/virtual_life --server http://127.0.0.1:8038 \
+  --token <owner-token> --node-id <id>
+```
+
+The release must publish a checksum, either a `SHA256SUMS` asset (which
+`packaging/build.py` already writes next to the wheel) or the asset `digest`.
+Without one a download cannot be verified, so the package is refused rather than
+installed — a wheel that ships no checksum never becomes `latest` either,
+although you can still name it with `--version`. `--github-token` (or
+`GITHUB_TOKEN`) unlocks private repositories; it is never written into the
+client config and is separate from the runtime token. `--github-api` overrides
+the API root, which is also how GitHub Enterprise and local testing are
+supported (`VIRTUAL_LIFE_LINUX_GITHUB_API`).
+
+Publishing a release from a checkout:
+
+```sh
+uv run --project clients/linux-node python clients/linux-node/packaging/build.py
+cd clients/linux-node/dist
+gh release create v0.1.0 virtual_life_linux-0.1.0-py3-none-any.whl SHA256SUMS \
+  --title "linux client 0.1.0"
+```
+
+Uploading the wheel without `SHA256SUMS` works, but `vl setup` will refuse the
+package until a checksum is added to the same release.
+
+### From a checkout, without a server
+
 ```sh
 uv run --project clients/linux-node python clients/linux-node/packaging/install.py
+```
+
+Zero-release alternative, straight from the repository:
+
+```sh
+uv tool install "git+https://github.com/wjq114514/virtual_life#subdirectory=clients/linux-node"
 ```
 
 The installer is re-runnable and never overwrites user files. `--dry-run`
@@ -110,7 +169,9 @@ prints what would change, `--skip-package` only refreshes the assets, and
 fish config and completions, the niri snippet (which you still have to append to
 your own `config.kdl`), the `.desktop` entry and the DMS manifest, then writes
 `config.toml` plus a 0600 `credentials` placeholder that you replace with your
-own token.
+own token. `packaging/install.py` is a thin shim over
+`virtual_life_linux.installer`, so the checkout and the wheel install the same
+files. The next version is bumped in `pyproject.toml` before rebuilding.
 
 ## Development
 

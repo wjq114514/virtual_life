@@ -76,6 +76,14 @@ def test_stable_device_id_survives_a_reinstall(tmp_path):
     assert stat.S_IMODE((tmp_path / ".device-id").stat().st_mode) == 0o600
 
 
+def test_stable_device_id_can_preview_without_writing(tmp_path):
+    value = installer.stable_device_id(tmp_path, write=False)
+    assert value.startswith("install-")
+    assert not (tmp_path / ".device-id").exists()
+    # The previewed id is never persisted, so it is not reused later.
+    assert installer.stable_device_id(tmp_path, write=False) != value
+
+
 def test_render_config_is_loadable(tmp_path):
     text = installer.render_config(
         "http://127.0.0.1:8038", "seat-1", "install-abc", "工位", attention_enabled=True

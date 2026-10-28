@@ -1,0 +1,4 @@
+# Local runtime configuration (never commit; contains server addresses and tokens).
+config.local.json
+__pycache__/
+*.pyc

@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from virtual_life_linux import cli
 
 CONFIG = """
@@ -79,3 +81,67 @@ def test_resolve_config_caches_by_path(tmp_path, monkeypatch):
 def test_resolve_runtime_dir_falls_back_without_config(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "run"))
     assert cli.resolve_runtime_dir(tmp_path / "missing.toml") == tmp_path / "run" / "virtual-life"
+
+
+def test_setup_from_github_removes_the_downloaded_wheel(tmp_path, monkeypatch):
+    """The wheel is consumed by the installer, so it must never linger in /tmp."""
+    wheel = "virtual_life_linux-0.2.0-py3-none-any.whl"
+
+    async def manifest(repo, token, *, api_base):
+        return cli_module_manifest()
+
+    async def download(server_url, package, destination, auth):
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(b"wheel-bytes")
+        assert server_url == ""  # the release supplies its own download URL
+        return destination
+
+    def install(source, *, dry_run):
+        assert source.name == wheel
+        assert source.read_bytes() == b"wheel-bytes"
+        return "installed via: fake"
+
+    monkeypatch.setattr("virtual_life_linux.dist_client.github_manifest", manifest)
+    monkeypatch.setattr("virtual_life_linux.dist_client.download_package", download)
+    monkeypatch.setattr("virtual_life_linux.installer.install_python_package", install)
+    monkeypatch.setattr("virtual_life_linux.installer.runtime_config_dir", lambda: tmp_path / "cfg")
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+
+    args = cli.build_parser().parse_args(
+        [
+            "setup",
+            "--github",
+            "wjq114514/virtual_life",
+            "--github-api",
+            "http://127.0.0.1:9",
+            "--server",
+            "http://127.0.0.1:8038",
+            "--node-id",
+            "seat",
+            "--version",
+            "0.2.0",
+            "--dry-run",
+            "--no-systemd",
+            "--backend",
+            "none",
+        ]
+    )
+    assert cli._run_setup(args) == cli.EXIT_OK
+    assert [path for path in Path("/tmp").glob("virtual-life-setup-*")] == []
+
+
+def cli_module_manifest():
+    from virtual_life_linux.dist_client import DistManifest, DistPackage
+
+    return DistManifest(
+        default_version="0.2.0",
+        packages=(
+            DistPackage(
+                version="0.2.0",
+                wheel="virtual_life_linux-0.2.0-py3-none-any.whl",
+                sha256="a" * 64,
+                download_url="http://127.0.0.1:9/assets/v0.2.0/wheel",
+            ),
+        ),
+    )

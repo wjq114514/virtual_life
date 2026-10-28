@@ -5,4 +5,5 @@
     <string name="notification_title">Virtual Life voice</string>
     <string name="notification_channel_screen">Screen sharing</string>
     <string name="notification_title_screen">Virtual Life screen</string>
+    <string name="accessibility_scene_description">为 Virtual Life 提供当前界面的结构化信息（包名、活动、窗口标题与主要控件），用于屏幕理解与活动分类。该服务只读取界面结构，不执行任何操作。</string>
 </resources>
