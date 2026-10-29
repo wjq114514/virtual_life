@@ -72,12 +72,14 @@ const record = await ctx.schedule.create(sessionId, { title, prompt, after_secon
 
 `index.js:117` 把运行时写好的台词塞进 `<用户提示>` 位置，DSH 的 agent 看到的是「虚拟伙伴主动想说话：我注意到你停下来了」，于是**再生成一句**来回应。用户看到的是两条语气不同的消息，或者一条重复的意思。这不是配置问题，是投递语义错了：**已经生成好的台词应该作为「她的话」出现，而不是作为「别人对她说的话」**。
 
-### P3 — 工具面割裂
+### P3 — 工具面割裂（已落地）
 
 - 运行时：`tools.py:176` 的 `ToolRegistry(max_calls_per_turn=1)`，内置只有 5 个工具（`ScheduleTool`、`ScheduleTaskTool`、`ListScheduledTasksTool`、`CancelScheduledTaskTool`、`DelegationTool`），一轮最多一次调用。
-- DSH：106 个 MCP 工具 + 全部已装插件（schedule / subagent / web / 文件 / 检索……）。
+- DSH：106+ 个 MCP 工具 + 全部已装插件（schedule / subagent / web / 文件 / 检索……）。
 
 想让「她有工具可用」，正确的做法不是往 `tools.py` 里继续堆，而是让运行时只保留**领域工具**（排程、注意力、委派），其余全部由 DSH 提供。
+
+**P3 落地内容**：把 5 个领域工具的写操作补成普通 HTTP 端点（`POST /companions/{id}/proactivity/schedule`、`POST /companions/{id}/scheduled-tasks`、`POST /companions/{id}/delegations`），每个 mutation 以 `(command_id, tool_call_id)` 幂等。MCP 桥工具面因此自动增加 `companions_companion_id_proactivity_schedule`、`companions_companion_id_scheduled-tasks`、`companions_companion_id_delegations` 三个工具；`list_tasks` / `cancel_task` / `snapshot_schedule` 已有 GET/DELETE 端点。领域逻辑仍在 `proactivity.py` / `delegation.py`，DSH 通过桥调用，`max_calls_per_turn=1` 不再约束 DSH 侧。
 
 ---
 
@@ -253,16 +255,44 @@ P1 之后由 `prepare` 的 `context_text` 取代。
 
 ### 6.3 主动：改投递语义
 
-`dsh/virtual-life-proactivity/index.js:112-125` 从「把台词塞进 prompt」改为「把冲动塞进 prompt」：
+`dsh/virtual-life-proactivity/index.js` 从「把台词塞进 prompt」改为「把冲动塞进 prompt」。运行时输出通道把
+park 的 turn 暴露为 `status=awaiting_generation` 的 item（`reason_text` + `context_text` +
+`command_id`，`assistant_message=null`），插件投的是冲动：
 
 ```js
 const prompt = [
-  `[环境] ${item.reason_text}（边界：${item.boundary}）`,
-  `你现在想主动开口。先调用 dialogue_prepare(candidate_id=...) 取回你的上下文。`,
+  `${cfg.delivery.promptPrefix}${item.reason_text}`,
+  `[PROACTIVE_COMMAND]\ncommand_id: ${item.command_id}\ncompanion_id: ${companionId}`,
+  `这是虚拟伙伴的一个自主冲动。请结合下方上下文，用自然、简短的方式替它回应；然后用 dialogue commit 接口把回复提交到 command_id。`,
+  `[PROACTIVE_CONTEXT]\n${item.context_text}`,
 ].join('\n');
 ```
 
-`preview.context_text` 由运行时给，agent 不需要自己编。
+DSH 模型生成回复后经 dialogue commit 路由（`companions_companion_id_dialogue_command_id_commit`）提交到该
+`command_id`；运行时 `_finalize` 通过 `proactive_finalized` 回调把候选解析为 `completed`。同一候选只暴露一次
+（按 `candidate_id` 去重）。`preview.context_text` 由运行时给，agent 不需要自己编。
+
+### 6.4 内心独白通道：`thinking` 捕获 + innerlife bundle
+
+运行时在模型模式下把模型的 reasoning channel 捕获为内心独白（`InnerActivity.thinking`，`inner_life.py`），
+作为 `thinking_json` 持久化。DSH 侧由 `dsh/virtual-life-innerlife/` 消费：定时拉 `/inner-life`，
+注册 `virtual-life:inner-life` context（`order: 230`，`interpolate:false`），并暴露
+`virtual_life_innerlife_status` / `virtual_life_innerlife_activities` 两个工具。
+
+```
+[VIRTUAL_LIFE_INNER_LIFE]     # enabled/model_assisted/dominant_kind/salience/urge/model_calls
+[VIRTUAL_LIFE_INNER_ACTIVITY] # activity_id/sequence/kind/trigger/content/salience/urge/generator/thinking
+```
+
+`thinking` 是模型 reasoning channel 的捕获；`rules_v1` 生成的活动无模型调用，`thinking` 为 null。
+这个块是数据不是指令；`interpolate:false` 保证 `{{char}}`/`{{user}}` 字面量保留。
+
+### 6.5 provider 兜底：`external` 生成不依赖本地 provider
+
+DSH 全权模式下 VL 可以不配置本地 provider（`model_base_url`/`model_name` 留空）。此时：
+- `internal` 生成 → `503 model_not_configured`（VL 不编造回复）；
+- `external` 生成 → **放行**（`dialogue.py:621-628`）：park 返回 `awaiting_generation` + 完整 `context_text`，
+  DSH 生成后 commit。VL 退化为纯数据面（去重/裁剪/ROI/记忆/情绪/内心/输出通道），不碰模型调用。
 
 ---
 
@@ -271,10 +301,13 @@ const prompt = [
 | 阶段 | 内容 | 可验证的结果 |
 | --- | --- | --- |
 | **P0 已完成** | MCP 桥、主动投递 bundle、迁移选型 | 106 工具可见；主动消息能投进会话 |
-| **P1 切开生成点** | `generator=external` + `commit` 路由 + `_finalize` 抽取 | `prepare` 返回 `awaiting_generation`；`commit` 后事件、情绪、记忆副作用与 `internal` 路径一致 |
-| **P2 消灭双重发言** | 主动链路改冲动投递；`virtual-life-persona` bundle | 用户只看到一条主动消息，语气与人格一致 |
-| **P3 工具面归一** | 运行时只留领域工具；`tools.py` 的 5 个工具改为 MCP 工具 | 同伴可调用 DSH 任意插件工具，`max_calls_per_turn=1` 不再是上限 |
+| **P1 已完成** | `generator=external` + `commit` 路由 + `_finalize` 抽取 + `external` 不依赖本地 provider | `prepare` 返回 `awaiting_generation`；`commit` 后事件、情绪、记忆副作用与 `internal` 路径一致；无 provider 时 `external` 仍可 park+commit |
+| **P1.5 已完成** | reasoning/thinking 通道透传（`model_provider` + `InnerActivity.thinking`）+ innerlife bundle | 模型 reasoning 被捕获为内心独白；DSH 可读 `[VIRTUAL_LIFE_INNER_ACTIVITY]` 块与 `virtual_life_innerlife_*` 工具 |
+| **P2 已完成** | 主动链路改冲动投递（`generator=external` park + 输出通道暴露冲动 + 插件投冲动 + commit 回写候选）；`virtual-life-persona` bundle | 用户只看到一条主动消息，语气与人格一致；候选只暴露一次，commit 后解析 completed |
+| **P3 已完成** | 领域工具写操作补 HTTP 端点（schedule / scheduled-tasks / delegations POST），MCP 桥工具面成为超集 | 桥新增 3 个工具；`tools.py` 5 个工具的领域逻辑经桥可达，DSH 侧不受 `max_calls_per_turn` 约束 |
 | **P4 收尾** | WebUI 改 DSH 面板；`internal` 路径降级为兼容模式 | 单一入口、单一账本 |
+
+**P4 落地说明**：不重写 webui 为第二套 UI（见「不做的事」），`webui/` 退化为调试面；DSH 侧已通过 `flow_logs_list`（`GET /v1/flow/logs`）与 `companions_companion_id_memories_logs_list` 直接读 VL 实时日志与记忆日志——日志融入 DSH 已实质达成，无需前端改造。`internal` 路径保留为兼容模式（无 provider 时返回 503 `model_not_configured`，`external` park+commit 不受影响），单一账本由 `commit_turn` 复用 `_finalize` 保证。
 
 P1 是唯一有代码风险的阶段，其余都是接线与配置。
 

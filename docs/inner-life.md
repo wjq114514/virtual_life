@@ -22,6 +22,7 @@
 - `attention_session_id`、`attention_boundary_id`
 - `context_version`、`source_event_id`
 - `generator`（`rules_v1` / `model_v1`）与可选 `model` 审计信息
+- `thinking`（模型模式下捕获的 reasoning channel，内心独白，最多 2048 字符；`rules_v1` 时为 null）
 - `status`（`active` / `expired`）与 `created_at` / `expires_at`
 
 `urgency`（`urge`）是候选强度，不等于发言许可。`content` 是内部提示材料，真实对话提示会明确标注“这是你自己的内在活动，不是用户发言”。`model.rationale` 仅供审计，绝不进入后续提示。
@@ -29,6 +30,8 @@
 ### 可选模型评判
 
 `model_assisted=true` 且模型已配置时，服务至多每个 `model_min_interval_seconds` 调用一次评判，并受每日次数与 token 账本限制。模型只返回 `kind`、`salience`、`urge`、`confidence`、`rationale`；服务验证 schema、置信度与允许类型，再按 `model_weight` 与本地分数混合。模型看到的最近对话被标记为不可信数据。调用不在 SQLite 写事务内执行，失败或无效输出自动使用本地结果。
+
+模型调用若带 reasoning channel（`reasoning_content`），服务把它捕获为 `thinking`（`model_provider` 透传 `ModelResult.reasoning`，`inner_life._judge` 截断到 2048 字符），随活动持久化；DSH 侧的 `dsh/virtual-life-innerlife/` 插件消费该字段作为内心独白。`thinking` 与 `model.rationale` 一样仅供消费方参考，不进入后续提示。
 
 ## 接口
 

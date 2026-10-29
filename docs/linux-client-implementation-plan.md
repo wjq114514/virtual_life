@@ -174,7 +174,7 @@ renderer attach 创建随机 `renderer_id` 和递增 generation，同一伙伴�
 | `POST /v1/nodes/{node_id}/presentations` | `{presentation_id, kind:"terminal"}`；renderer 已准备后开启。返回 node_id、presentation_id、expires_at、ttl_seconds、server_time、opened_sequence。 |
 | `POST /v1/nodes/{node_id}/presentations/{presentation_id}/heartbeat` | 仅刷新未释放且未过期的会话；过期不能复活。 |
 | `DELETE /v1/nodes/{node_id}/presentations/{presentation_id}` | 幂等释放指定会话，不释放新会话、不删除节点。 |
-| `GET /v1/companions/{id}/proactivity/native-output` | node_id、presentation_id、epoch、可选 after_sequence；返回当前仍可呈现的原生主动文字页。 |
+| `GET /v1/companions/{id}/proactivity/native-output` | node_id、presentation_id、epoch、可选 after_sequence；返回当前仍可呈现的原生主动文字页。DSH 全权模式下 item 可能为 `status=awaiting_generation` 的冲动（`reason_text`/`context_text`/`command_id`，`assistant_message=null`），需经 dialogue commit 路由提交回复。 |
 | `GET /v1/companions/{id}/dialogue/history` | 可选 before_sequence、limit；按 companion 返回 completed 对话对与前页游标，最新页优先，供回看与近期 history 重建。 |
 
 新增独立 `native_presentations` 表，同节点至多一个活跃 terminal presentation。与 Web access 分表；Web 可以继续管理或只读浏览，但同一设备已开活跃 Web access 时，原生 connect 返回 `presentation_busy`，要求用户关闭另一入口或明确接管；反向建立 Web access 也须检查原生呈现。对应冲突检查在同一个写事务内完成，不仅在读取输出时检查。只开 WebUI 管理页不等于申请 Web access。

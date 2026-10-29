@@ -2,7 +2,9 @@
 
 设备是 AI 可以感知和穿梭的节点；陪伴者携带持续状态在呈现节点之间接力，共同记忆统一持久化。安卓、电脑提供陪伴入口，服务器和家庭设备通过轻客户端或网关报告状态。
 
-接口包含节点注册与能力图、共读上下文、迁移握手、输出租约、事件回放、有召回预算的长期记忆，以及跨设备共享的人格与短期状态。WebUI 提供文本对话与记忆查看；模型由服务端配置，提示预览、记忆写入和召回在本地完成。
+接口包含节点注册与能力图、共读上下文、迁移握手、输出租约、事件回放、有召回预算的长期记忆，以及跨设备共享的人格与短期状态。WebUI 提供文本对话与记忆查看。
+
+**推理与运行边界**：模型调用已全部移交 [DSH](#dsh-插件)（外部生成，`generator: external` 在派发闸口挂起、由 DSH 提交回复）；Virtual Life 本身只维护状态机（节点/房间、迁移、租约、输出 gate）、长期记忆、人格与内心活动（inner_life），并保留本地提示预览、记忆写入与召回。没有配置本地 provider 时 VL 降级为纯数据面：`external` 仍返回 `awaiting_generation`，`internal` 返回 `503 model_not_configured`。
 
 ## 设计理念
 
@@ -51,6 +53,8 @@ extra_body = { thinking = { type = "disabled" } }
 ```
 
 模型密钥只由服务器读取，页面连接 token 只存当前页面内存，或经 `POST /v1/session` 换成服务器签名的 HttpOnly 会话 Cookie（脚本读不到、不随跨站请求发送、不包含令牌本身）。未配置模型不影响日志与事件查看。详见[设备身份与访问](docs/device-identity.md)与 [WebUI 合同](docs/webui.md)。
+
+> **DSH 模式**：推荐把 `generator: "external"`（DSH 通过 MCP 桥或 `commit` 路由提交回复）作为主路径，本地 `[model]` 仅用于提示预览、记忆写入/召回和演示；`generator: "internal"` 保留为本地回退。DSH 侧消费 [MCP 桥](docs/mcp-bridge.md) 或 [DSH 插件](#dsh-插件) 完成生成与提交。
 
 ## 连续语音与服务端视觉
 
@@ -185,6 +189,26 @@ python3 clients/qq-node/qq_node.py --config clients/qq-node/example.json
 
 事件映射、配置字段与单测命令见该目录 README。
 
+[Matrix 节点桥](clients/matrix-node/README.md) 把 Matrix（经任一 homeserver）接入为另一个房间：房间消息映射为对话轮次，用户在场/输入映射为 attention 样本（`user_present` + `activity=chat`），伙伴回复通过 `m.room.message` 回发。默认 stdlib-only 子集（密码/Token 认证、sync 长轮询、`m.text` 提取、发送、加入房间）；`e2ee: true` 时启用可选 Node 边车（`matrix-js-sdk` RustCrypto）做 Olm/Megolm 加解密。运行（Python 3.12+）：
+
+```bash
+VIRTUAL_LIFE_API_TOKEN=local-dev-token \
+python3 clients/matrix-node/matrix_node.py --config clients/matrix-node/example.json
+```
+
+E2EE 需先 `cd clients/matrix-node/e2ee && npm install`；缺 Node 或边车无法启动时以错误码 3 退出。事件映射与配置字段见该目录 README。
+
+## DSH 插件
+
+模型推理由 DSH（DeepSeek Harness）承担，VL 提供数据面与状态机。DSH 侧以三种方式接入：
+
+- **`virtual-life-mcp`**：契约驱动 MCP 桥（`mcp_bridge.py` 启动时读运行时 OpenAPI，把每个 operation 暴露为 MCP 工具；streamable HTTP + stdio，JSON-RPC 2.0 over httpx，真鉴权/校验/幂等）。详见 [MCP 桥](docs/mcp-bridge.md)。
+- **`virtual-life-persona`**：把人格 / 状态 / 慢变量快照注入为 labeled context（`[VIRTUAL_LIFE_COMPANION]` / `[VIRTUAL_LIFE_STATE]` / `[VIRTUAL_LIFE_SLOW_VARIABLES]`），作为数据而非指令。
+- **`virtual-life-proactivity`**：轮询主动输出通道（`/proactivity/output`、`/proactivity/native-output`），每条 ready 消息经 `ctx.schedule` 成独立 turn；回复经 `POST /dialogue/{command_id}/commit` 提交，运行时把候选解析为 `completed`。
+- **`virtual-life-innerlife`**：轮询内心活动通道（`/inner-life`、`/inner-life/activities`），缓存最新活动与 `thinking`（模型模式捕获的 reasoning 内心独白），注册 labeled context 块并暴露查看/翻页工具。
+
+插件定位、迁移分析与融合规划见 [DSH 集成](docs/dsh-integration.md) 与 [融合计划](docs/dsh-fusion-plan.md)。
+
 ## 长期记忆
 
 当前保存工作上下文、共同经历、稳定认识、派生摘要与知识图谱。完成对话默认自动排队，在同一伙伴积累 4 轮或最旧事件等待 60 秒后批量整理；用户明确陈述形成未经确认的事实、偏好和关系，助手文字作为对话行为归档。手动记录、手动编辑及固定/确认内容受保护。记忆页可查看进度、摘要、关系及提前整理。
@@ -270,5 +294,7 @@ WebUI 阶段已通过 Ruff、Python/JavaScript 语法检查、28 个路径的 Op
 - [向量记忆、实体别名与多跳图谱](docs/vector-memory-and-graph.md)
 - [MaiBot、Operit、AIRI 等参考调研](docs/references.md)
 - [节点协议](docs/protocol.md)
+- [MCP 桥与 DSH 工具面](docs/mcp-bridge.md)
+- [DSH 集成与插件定位](docs/dsh-integration.md)
 
 本轮是单所有者的本地开发框架。账号、设备配对、多人隔离、服务端取消对话、角色动画资产和安卓宿主 UI 属于后续工作。
