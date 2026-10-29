@@ -289,6 +289,31 @@ class WebUISessionStatus(BaseModel):
     expires_at: str | None = None
 
 
+class ProactiveScheduleRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    command_id: Identifier
+    tool_call_id: Identifier
+    delay_seconds: int = Field(ge=60, le=604_800)
+    reason: str | None = Field(default=None, max_length=200)
+
+
+class ScheduledTaskRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    command_id: Identifier
+    tool_call_id: Identifier
+    title: str = Field(min_length=1, max_length=200)
+    details: str | None = Field(default=None, max_length=2_000)
+    delay_seconds: int = Field(ge=60, le=2_592_000)
+
+
+class DelegationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    command_id: Identifier
+    tool_call_id: Identifier
+    instruction: str = Field(min_length=1, max_length=8_000)
+    agent: str | None = Field(default=None, max_length=64)
+
+
 def create_app(
     settings: Settings | None = None,
     *,
@@ -442,6 +467,7 @@ def create_app(
         inner_life=inner_life,
         screen_service=screen_vision,
         scene_classifier=scene_classifier,
+        debounce_seconds=settings.dialogue_debounce_seconds,
     )
     if speech_provider is not None:
         speech_registry = SpeechProviderRegistry(speech_provider)
@@ -1332,6 +1358,22 @@ def create_app(
     def get_proactivity_schedule(companion_id: str):
         return proactivity.snapshot_schedule(companion_id)
 
+    @router.post(
+        "/companions/{companion_id}/proactivity/schedule",
+        tags=["proactivity"],
+    )
+    def schedule_proactive(
+        companion_id: str,
+        body: ProactiveScheduleRequest,
+    ):
+        return proactivity.schedule(
+            companion_id,
+            body.command_id,
+            body.tool_call_id,
+            body.delay_seconds,
+            body.reason,
+        )
+
     @router.get(
         "/companions/{companion_id}/scheduled-tasks",
         tags=["tools"],
@@ -1343,6 +1385,23 @@ def create_app(
         offset: int = Query(default=0, ge=0),
     ):
         return proactivity.list_tasks(companion_id, status=status, limit=limit, offset=offset)
+
+    @router.post(
+        "/companions/{companion_id}/scheduled-tasks",
+        tags=["tools"],
+    )
+    def create_scheduled_task(
+        companion_id: str,
+        body: ScheduledTaskRequest,
+    ):
+        return proactivity.schedule_task(
+            companion_id,
+            body.command_id,
+            body.tool_call_id,
+            body.title,
+            body.details,
+            body.delay_seconds,
+        )
 
     @router.delete(
         "/companions/{companion_id}/scheduled-tasks/{task_id}",
@@ -1373,6 +1432,22 @@ def create_app(
         offset: int = Query(default=0, ge=0),
     ):
         return delegation.list(companion_id, limit=limit, offset=offset)
+
+    @router.post(
+        "/companions/{companion_id}/delegations",
+        tags=["tools"],
+    )
+    def enqueue_delegation(
+        companion_id: str,
+        body: DelegationRequest,
+    ):
+        return delegation.enqueue(
+            companion_id,
+            body.command_id,
+            body.tool_call_id,
+            body.instruction,
+            body.agent,
+        )
 
     @router.get(
         "/companions/{companion_id}/proactivity/output",

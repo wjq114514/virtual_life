@@ -93,6 +93,7 @@ def test_incremental_multibyte_frames_and_usage(monkeypatch):
     provider, stream, seen, clients = setup_provider(monkeypatch, chunks())
     result = provider.stream(REQUEST, drafts.append)
     assert result.text == "你好!"
+    assert result.reasoning == "secret thought"
     assert result.usage == ModelUsage(12, 4)
     assert stream.closed and clients[0].is_closed
     body = json.loads(seen[0].content)
@@ -235,10 +236,14 @@ def test_invalid_header_fails_before_dispatch(monkeypatch):
 
 
 def test_complete_keeps_nonstreaming_contract(monkeypatch):
-    payload = {"choices": [{"message": {"content": "hello"}}], "usage": USAGE}
+    payload = {
+        "choices": [{"message": {"content": "hello", "reasoning_content": "inner monologue"}}],
+        "usage": USAGE,
+    }
     provider, stream, seen, _ = setup_provider(monkeypatch, [json.dumps(payload).encode()])
     result = provider.complete(REQUEST)
     assert result.text == "hello"
+    assert result.reasoning == "inner monologue"
     assert json.loads(seen[0].content)["stream"] is False
     assert stream.closed
 

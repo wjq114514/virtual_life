@@ -208,3 +208,69 @@ def test_internal_is_still_the_default_and_calls_the_provider(tmp_path):
         assert response.json()["status"] == "completed"
         assert response.json()["assistant_message"] == "嗯。"
         assert len(calls) == 1
+
+
+def test_external_generation_allowed_without_local_provider(tmp_path):
+    """DSH-owns-everything mode: no local model configured, yet external
+    generation (park + commit) must still work, because it never calls the
+    local provider. VL is a pure data plane here."""
+    settings = Settings(
+        database_path=str(tmp_path / "no-provider.sqlite"),
+        api_token="test-token",
+        # No model_base_url / model_name: the local provider is never built.
+    )
+    app = create_app(settings, model_provider=None)
+    with TestClient(app, headers={"Authorization": "Bearer test-token"}) as client:
+        state = attach_desktop(client)
+        response = client.post(
+            "/v1/companions/sui/dialogue",
+            json={
+                "command_id": "external-noprovider",
+                "node_id": "desk",
+                "epoch": state["epoch"],
+                "expected_revision": state["revision"],
+                "user_message": "在吗",
+                "generator": "external",
+            },
+        )
+        assert response.status_code == 200, response.text
+        receipt = response.json()
+        assert receipt["status"] == "awaiting_generation"
+        assert receipt["preview"]["context_text"].strip()
+        # Commit an externally generated reply under the same gates.
+        commit = client.post(
+            "/v1/companions/sui/dialogue/external-noprovider/commit",
+            json={
+                "assistant_message": "我在，慢慢来。",
+                "model": "external-agent",
+                "usage": {"input_tokens": 10, "output_tokens": 2},
+            },
+        )
+        assert commit.status_code == 200, commit.text
+        assert commit.json()["status"] == "completed"
+        assert commit.json()["assistant_message"] == "我在，慢慢来。"
+        assert commit.json()["model"] == "external-agent"
+
+
+def test_internal_generation_requires_local_provider(tmp_path):
+    """Without a local provider, internal generation must still be refused with
+    model_not_configured (VL does not fabricate a reply)."""
+    settings = Settings(
+        database_path=str(tmp_path / "no-provider-internal.sqlite"),
+        api_token="test-token",
+    )
+    app = create_app(settings, model_provider=None)
+    with TestClient(app, headers={"Authorization": "Bearer test-token"}) as client:
+        state = attach_desktop(client)
+        response = client.post(
+            "/v1/companions/sui/dialogue",
+            json={
+                "command_id": "internal-noprovider",
+                "node_id": "desk",
+                "epoch": state["epoch"],
+                "expected_revision": state["revision"],
+                "user_message": "在吗",
+            },
+        )
+        assert response.status_code == 503, response.text
+        assert response.json()["error"]["code"] == "model_not_configured"

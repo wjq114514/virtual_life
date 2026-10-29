@@ -16,8 +16,15 @@ class ProactivityOutput(BaseModel):
     sequence: int = Field(ge=0)
     event_id: Identifier
     command_id: Identifier
-    assistant_message: str
+    assistant_message: str | None = None
     created_at: str
+    # DSH-owned path (parked turn): the urge is exposed instead of a reply.
+    candidate_id: Identifier | None = None
+    boundary: str | None = None
+    origin: str | None = None
+    status: str = "completed"
+    reason_text: str | None = None
+    context_text: str | None = None
 
 
 class ProactivityOutputPage(BaseModel):
@@ -98,22 +105,46 @@ class ProactivityOutputService:
             is not None
         )
 
+    def _reason_text(self, candidate, result, connection):
+        """Compose a short human-readable urge reason for a parked proactive turn.
+
+        The receipt's pending request carries the assembled ``user_message``
+        (the urge the brain should react to). Fall back to a generic phrase when
+        the pending payload is unavailable.
+        """
+        pending = result.get("pending") or {}
+        request = pending.get("request") or {}
+        text = request.get("user_message")
+        if text:
+            return text[:512]
+        boundary = candidate["boundary"]
+        return {
+            "task_completed": "宿主报告用户刚完成一个任务。",
+            "break_started": "宿主报告用户开始休息。",
+            "user_returned": "宿主报告用户回来了。",
+        }.get(boundary, "我想说句话。")
+
     def _current(self, connection, candidate, companion, result, now):
         # The dialogue receipt/event commits before the worker updates its
         # denormalized candidate status. Do not lose output in that short window.
+        # `awaiting_generation` is the DSH-owned path: the turn is parked at the
+        # dispatch gate and the output channel exposes the urge (reason_text +
+        # assembled context) instead of a locally produced reply.
         if candidate["status"] not in {"completed", "running"}:
             return False
         if self.proactivity._reason(connection, candidate, companion, now) != "eligible":
             return False
         preview = result["preview"]
         if (
-            result["status"] != "completed"
-            or not result["assistant_message"]
+            result["status"] not in {"completed", "awaiting_generation"}
             or preview["epoch"] != companion["epoch"]
             or preview["companion_revision"] != companion["revision"]
             or preview["active_node_id"] != companion["active_node_id"]
         ):
             return False
+        if result["status"] == "awaiting_generation" and not result.get("assistant_message"):
+            # Parked turn: the output item carries the urge, not a reply.
+            return True
         p = self.dialogue.personality_service
         identity = companion["companion_id"]
         profile = p._profile_snapshot(identity, p._profile_row(connection, identity))
@@ -211,10 +242,12 @@ class ProactivityOutputService:
                 start = max(after_sequence, access_start)
             rows = connection.execute(
                 """SELECT * FROM events WHERE sequence>? AND sequence<=?
-                AND companion_id=? AND recipient_node_id=? AND type='companion.proactive_completed'
+                AND companion_id=? AND recipient_node_id=?
+                AND type IN ('companion.proactive_completed', 'companion.proactive_parked')
                 ORDER BY sequence LIMIT 20""",
                 (start, head, companion_id, node_id),
             ).fetchall()
+            seen: set[str] = set()
             for event in rows:
                 payload = json.loads(event["payload_json"])
                 candidate = connection.execute(
@@ -228,22 +261,43 @@ class ProactivityOutputService:
                 ).fetchone()
                 if candidate is None or receipt is None or receipt["result_json"] is None:
                     continue
-                result = json.loads(receipt["result_json"])
-                if result["source_event_id"] != event["event_id"]:
+                # A DSH-owned turn surfaces as one urge (the park event); once DSH
+                # commits, the same candidate's completed event is not re-delivered.
+                if payload["candidate_id"] in seen:
                     continue
+                seen.add(payload["candidate_id"])
+                stored = json.loads(receipt["result_json"])
+                # A parked turn stores {receipt, pending}; resolve the receipt.
+                result = stored.get("receipt", stored)
+                # The park event carries its own command/candidate ids; the
+                # receipt's source_event_id points at the original trigger, not
+                # the park event, so only gate on the ids for parked turns.
+                if event["type"] == "companion.proactive_completed":
+                    if result["source_event_id"] != event["event_id"]:
+                        continue
                 if not self._current(connection, candidate, companion, result, now):
                     continue
                 if self._interrupted(connection, candidate, event["sequence"]):
                     continue
-                page["items"].append(
-                    {
-                        "sequence": event["sequence"],
-                        "event_id": event["event_id"],
-                        "command_id": payload["command_id"],
-                        "assistant_message": result["assistant_message"],
-                        "created_at": event["occurred_at"],
-                    }
-                )
+                item = {
+                    "sequence": event["sequence"],
+                    "event_id": event["event_id"],
+                    "command_id": payload["command_id"],
+                    "created_at": event["occurred_at"],
+                    "candidate_id": candidate["candidate_id"],
+                    "boundary": candidate["boundary"],
+                    "origin": candidate["origin"],
+                }
+                if result["status"] == "awaiting_generation":
+                    # DSH-owned path: expose the urge (reason + assembled prompt).
+                    item["status"] = "awaiting_generation"
+                    item["reason_text"] = self._reason_text(candidate, stored, connection)
+                    item["context_text"] = result["preview"].get("context_text", "")
+                    item["assistant_message"] = None
+                else:
+                    item["status"] = "completed"
+                    item["assistant_message"] = result["assistant_message"]
+                page["items"].append(item)
             if len(rows) == 20:
                 page["next_sequence"] = rows[-1]["sequence"]
             return page

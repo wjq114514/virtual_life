@@ -79,7 +79,16 @@ def complete(runtime):
     policy(runtime)
     observe(runtime)
     result = runtime[1].state.proactivity.process_next()
-    assert result["status"] == "completed", result
+    assert result["status"] == "awaiting_generation", result
+    # DSH-owned path: commit the externally generated reply through the route.
+    client, _, _, _, _ = runtime
+    decision = client.get("/v1/companions/sui/proactivity/decisions").json()["decisions"][0]
+    commit = client.post(
+        f"/v1/companions/sui/dialogue/{decision['command_id']}/commit",
+        json={"assistant_message": "歇一会儿，我在。", "usage": None},
+    )
+    assert commit.status_code == 200, commit.text
+    assert commit.json()["status"] == "completed"
     return result
 
 
@@ -151,8 +160,10 @@ def test_native_output_is_baselined_to_the_session(runtime):
     delivered = native_poll(client, after_sequence=cursor).json()
     assert len(delivered["items"]) == 1
     assert delivered["items"][0]["assistant_message"] == "歇一会儿，我在。"
+    assert delivered["items"][0]["status"] == "completed"
     assert native_poll(client).json()["items"] == []
-    assert len(runtime[3].requests) == 1
+    # The proactive turn was DSH-owned; the local provider was never invoked.
+    assert len(runtime[3].requests) == 0
 
 
 def test_native_output_never_replays_before_the_session(runtime):

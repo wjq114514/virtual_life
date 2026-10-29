@@ -148,19 +148,55 @@ def test_boundary_generates_once_without_forging_user_or_emotion(runtime):
     before = client.get("/v1/companions/sui/emotion").json()
     accepted = observe(runtime)
     assert not provider.requests
-    assert app.state.proactivity.process_next()["status"] == "completed"
-    assert len(provider.requests) == 1
-    assert provider.requests[0].purpose == "proactive"
-    assert "PROACTIVE_CONTEXT_DATA" in provider.requests[0].context_text
-    assert "CURRENT_USER_MESSAGE_DATA" not in provider.requests[0].context_text
+    # Open the poller access before the urge is produced so the output channel
+    # replays the park event for a fresh cursor (access_start precedes it).
+    access = client.post(
+        "/v1/nodes/access/web",
+        json={
+            "browser_id": "test",
+            "access_id": "access-1",
+            "label": "test",
+            "kind": "desktop",
+            "bind_node_id": "desk",
+        },
+    )
+    assert access.status_code == 201, access.text
+    # DSH-owned path: the turn is parked, not locally completed.
+    assert app.state.proactivity.process_next()["status"] == "awaiting_generation"
+    assert not provider.requests
     item = decisions(runtime)[0]
-    assert item["status"] == "completed"
-    receipt = client.get("/v1/companions/sui/dialogue/" + item["command_id"]).json()
+    assert item["status"] == "running"
+    assert item["reason"] == "eligible"
+    # The parked turn still exposes the assembled prompt through the output channel.
+    page = client.get(
+        "/v1/companions/sui/proactivity/output"
+        "?node_id=desk&access_id=access-1&epoch=1&after_sequence=0"
+    ).json()
+    assert page["items"]
+    urge = page["items"][-1]
+    assert urge["status"] == "awaiting_generation"
+    assert urge["assistant_message"] is None
+    assert "PROACTIVE_CONTEXT_DATA" in urge["context_text"]
+    assert "CURRENT_USER_MESSAGE_DATA" not in urge["context_text"]
+    assert urge["reason_text"]
+    # Commit the externally generated reply through the dialogue commit route.
+    command_id = item["command_id"]
+    commit = client.post(
+        f"/v1/companions/sui/dialogue/{command_id}/commit",
+        json={"assistant_message": "歇一会儿，我在。", "usage": None},
+    )
+    assert commit.status_code == 200
+    assert commit.json()["status"] == "completed"
+    assert commit.json()["assistant_message"] == "歇一会儿，我在。"
+    receipt = client.get("/v1/companions/sui/dialogue/" + command_id).json()
     assert receipt["assistant_message"] == "歇一会儿，我在。"
     assert receipt["preview"]["participation"]["reason"] == "chat_participation"
+    # Candidate resolves to completed once DSH commits.
+    final = decisions(runtime)[0]
+    assert final["status"] == "completed"
     page = client.get("/v1/events?limit=500").json()["events"]
     events = [event for event in page if event["type"].startswith("companion.proactive_")]
-    assert len(events) == 2
+    assert len(events) == 3  # decided + parked + completed
     assert "user_message" not in events[-1]["payload"]
     assert events[-1]["recipient_node_id"] == "desk"
     assert client.get("/v1/companions/sui/emotion").json() == before
@@ -260,7 +296,6 @@ def test_generation_rechecks_current_gates_and_discards(runtime, change):
     policy(runtime)
     observe(runtime)
     client, app, clock, provider, state = runtime
-    budget_day = clock.value.date().isoformat()
 
     def invalidate():
         if change == "attention":
@@ -300,14 +335,37 @@ def test_generation_rechecks_current_gates_and_discards(runtime, change):
                 },
             )
 
-    provider.action = invalidate
-    assert app.state.proactivity.process_next()["status"] == "discarded"
+    # The turn is parked (DSH-owned). The gate change happens between park and
+    # commit, so the externally committed reply must be discarded at _finalize.
+    assert app.state.proactivity.process_next()["status"] == "awaiting_generation"
+    invalidate()
     item = decisions(runtime)[0]
+    receipt = client.get("/v1/companions/sui/dialogue/" + item["command_id"]).json()
+    assert receipt["status"] == "awaiting_generation"
+    commit = client.post(
+        f"/v1/companions/sui/dialogue/{item['command_id']}/commit",
+        json={"assistant_message": "歇一会儿，我在。", "usage": None},
+    )
+    if change == "lease":
+        # The clock jump also trips the 300s commit window; the parked turn is
+        # expired and the candidate resolved to discarded, not left in flight.
+        assert commit.status_code == 409
+        assert commit.json()["error"]["code"] == "dialogue_commit_expired"
+        final = decisions(runtime)[0]
+        assert final["status"] == "discarded"
+        assert final["reason"] == "dialogue_commit_expired"
+        assert not any(
+            event["type"] == "companion.proactive_completed"
+            for event in client.get("/v1/events?limit=500").json()["events"]
+        )
+        return
+    assert commit.status_code == 200
+    final = decisions(runtime)[0]
+    assert final["status"] == "discarded"
+    assert final["reason"]
     receipt = client.get("/v1/companions/sui/dialogue/" + item["command_id"]).json()
     assert receipt["assistant_message"] is None
     assert receipt["discard_reason"]
-    assert receipt["usage"]["output_tokens"] == 12
-    assert app.state.memory.budget_snapshot("sui", budget_day)["spent_tokens"] == 92
     assert not any(
         event["type"] == "companion.proactive_completed"
         for event in client.get("/v1/events?limit=500").json()["events"]
@@ -322,7 +380,16 @@ def test_expiry_cooldown_daily_limit_and_restart(runtime):
     assert client.get("/v1/nodes/desk/attention").json()["stale"]
     assert app.state.proactivity.process_next()["reason"] == "attention_stale"
     observe(runtime, 2)
-    assert app.state.proactivity.process_next()["status"] == "completed"
+    # DSH-owned path: the turn parks at awaiting_generation. Complete the round
+    # trip so cooldown/daily-limit gates observe a finished reply.
+    result = app.state.proactivity.process_next()
+    assert result["status"] == "awaiting_generation"
+    command_id = decisions(runtime)[-1]["command_id"]
+    commit = client.post(
+        f"/v1/companions/sui/dialogue/{command_id}/commit",
+        json={"assistant_message": "歇一会儿，我在。", "usage": None},
+    )
+    assert commit.status_code == 200, commit.text
     observe(runtime, 3)
     assert decisions(runtime)[-1]["reason"] == "cooldown"
     clock.value += timedelta(seconds=31)
@@ -332,37 +399,49 @@ def test_expiry_cooldown_daily_limit_and_restart(runtime):
     assert restarted.get_policy("sui")["policy"]["enabled"]
     assert restarted.decisions("sui")["decisions"] == decisions(runtime)
     assert restarted.process_next() is None
-    assert len(provider.requests) == 1
+    assert len(provider.requests) == 0
 
 
 def test_unknown_provider_failure_is_not_retried_or_refunded(runtime):
     policy(runtime)
     observe(runtime)
-    _, app, _, provider, _ = runtime
+    client, app, _, provider, _ = runtime
 
     def fail():
         raise ProviderError("timeout", "usage is unknown")
 
     provider.action = fail
-    assert app.state.proactivity.process_next()["reason"] == "timeout"
+    # DSH-owned path: the provider is never invoked, so an unknown provider
+    # failure cannot occur; the turn parks and the reservation stays held until
+    # DSH commits (or the commit window expires). Simulate the commit here.
+    assert app.state.proactivity.process_next()["status"] == "awaiting_generation"
     assert app.state.proactivity.process_next() is None
-    assert app.state.memory.budget_snapshot("sui")["reserved_tokens"] > 0
+    command_id = decisions(runtime)[0]["command_id"]
+    commit = client.post(
+        f"/v1/companions/sui/dialogue/{command_id}/commit",
+        json={"assistant_message": "歇一会儿，我在。", "usage": None},
+    )
+    assert commit.status_code == 200, commit.text
     observe(runtime, 2)
     assert decisions(runtime)[-1]["reason"] == "cooldown"
-    assert len(provider.requests) == 1
+    assert len(provider.requests) == 0
 
 
 def test_simultaneous_workers_claim_only_once(runtime):
     policy(runtime)
     observe(runtime)
-    _, app, _, provider, _ = runtime
+    client, app, _, provider, _ = runtime
     entered, release = Event(), Event()
+    real_send = app.state.dialogue.send_proactive
 
-    def wait():
+    def blocking_send(companion_id, payload):
         entered.set()
         assert release.wait(timeout=5)
+        return real_send(companion_id, payload)
 
-    provider.action = wait
+    # Block inside the dispatch so worker 1 holds the running claim while worker
+    # 2 tries to claim; the provider is never invoked on the DSH-owned path.
+    app.state.dialogue.send_proactive = blocking_send
     with ThreadPoolExecutor(max_workers=2) as pool:
         first = pool.submit(app.state.proactivity.process_next)
         assert entered.wait(timeout=5)
@@ -370,8 +449,18 @@ def test_simultaneous_workers_claim_only_once(runtime):
             assert pool.submit(app.state.proactivity.process_next).result(timeout=5) is None
         finally:
             release.set()
-        assert first.result(timeout=5)["status"] == "completed"
-    assert len(provider.requests) == 1
+        # DSH-owned path: the winning worker parks at awaiting_generation.
+        assert first.result(timeout=5)["status"] == "awaiting_generation"
+        assert len(provider.requests) == 0
+        # Complete the round trip so the candidate resolves to completed.
+        command_id = decisions(runtime)[0]["command_id"]
+        commit = client.post(
+            f"/v1/companions/sui/dialogue/{command_id}/commit",
+            json={"assistant_message": "歇一会儿，我在。", "usage": None},
+        )
+        assert commit.status_code == 200, commit.text
+        assert decisions(runtime)[0]["status"] == "completed"
+    assert len(provider.requests) == 0
 
 
 def test_refresh_has_no_observation_event_and_new_boundary_replaces_queue(runtime):
@@ -386,8 +475,16 @@ def test_refresh_has_no_observation_event_and_new_boundary_replaces_queue(runtim
     observe(runtime, 3)
     assert [item["status"] for item in decisions(runtime)] == ["suppressed", "queued"]
     assert decisions(runtime)[0]["reason"] == "boundary_superseded"
-    assert app.state.proactivity.process_next()["status"] == "completed"
-    assert len(provider.requests) == 1
+    # DSH-owned path: parks at awaiting_generation; no local provider call.
+    result = app.state.proactivity.process_next()
+    assert result["status"] == "awaiting_generation"
+    assert len(provider.requests) == 0
+    command_id = decisions(runtime)[1]["command_id"]
+    commit = client.post(
+        f"/v1/companions/sui/dialogue/{command_id}/commit",
+        json={"assistant_message": "歇一会儿，我在。", "usage": None},
+    )
+    assert commit.status_code == 200, commit.text
     events = client.get("/v1/events?limit=500").json()["events"]
     assert sum(event["type"] == "node.observation" for event in events) == 2
 
@@ -434,14 +531,24 @@ def test_restart_recovers_receipt_without_replaying_output(runtime):
     policy(runtime)
     observe(runtime)
     client, app, _, provider, _ = runtime
-    assert app.state.proactivity.process_next()["status"] == "completed"
+    # DSH-owned path: parks at awaiting_generation; commit completes the turn.
+    result = app.state.proactivity.process_next()
+    assert result["status"] == "awaiting_generation"
+    command_id = decisions(runtime)[0]["command_id"]
+    commit = client.post(
+        f"/v1/companions/sui/dialogue/{command_id}/commit",
+        json={"assistant_message": "歇一会儿，我在。", "usage": None},
+    )
+    assert commit.status_code == 200, commit.text
+    # Simulate a restart: the candidate is back to running but the receipt is
+    # already terminal, so a fresh service recovers it without regenerating.
     with app.state.coordinator.store.transaction(write=True) as connection:
         connection.execute("UPDATE proactivity_candidates SET status='running', finished_at=NULL")
     assert ProactivityService(app.state.dialogue).process_next() is None
     assert decisions(runtime)[0]["reason"] == "receipt_recovered"
     events = client.get("/v1/events?limit=500").json()["events"]
     assert sum(event["type"] == "companion.proactive_completed" for event in events) == 1
-    assert len(provider.requests) == 1
+    assert len(provider.requests) == 0
 
 
 def test_unconfirmed_running_claim_expires_without_redispatch(runtime):
@@ -503,11 +610,26 @@ def test_background_loop_executes_queued_boundary(runtime):
     observe(runtime)
     client, app, _, provider, _ = runtime
     done = Event()
-    provider.action = done.set
+    real_send = app.state.dialogue.send_proactive
+
+    def signal_send(companion_id, payload):
+        done.set()
+        return real_send(companion_id, payload)
+
+    # The loop parks the turn (DSH-owned); signal once dispatch begins.
+    app.state.dialogue.send_proactive = signal_send
     with TestClient(app, headers={"Authorization": "Bearer test"}):
         assert done.wait(timeout=5)
+    # DSH-owned path: the loop parks the turn; provider is never invoked.
+    assert decisions(runtime)[0]["status"] == "running"
+    assert len(provider.requests) == 0
+    command_id = decisions(runtime)[0]["command_id"]
+    commit = client.post(
+        f"/v1/companions/sui/dialogue/{command_id}/commit",
+        json={"assistant_message": "歇一会儿，我在。", "usage": None},
+    )
+    assert commit.status_code == 200, commit.text
     assert decisions(runtime)[0]["status"] == "completed"
-    assert len(provider.requests) == 1
     assert (
         client.get(
             "/v1/companions/sui/proactivity/decisions", headers={"Authorization": "Bearer bad"}

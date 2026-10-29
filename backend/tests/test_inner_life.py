@@ -32,7 +32,12 @@ class Provider:
         if request.purpose == "inner_life":
             if getattr(self, "fail_inner", False):
                 raise ProviderError("provider_failed", "judge unavailable")
-            return ModelResult(json.dumps(self.judge), "fake", ModelUsage(120, 30))
+            return ModelResult(
+                json.dumps(self.judge),
+                "fake",
+                ModelUsage(120, 30),
+                reasoning=getattr(self, "inner_reasoning", ""),
+            )
         return ModelResult("随：我在，慢慢来。", "fake", ModelUsage(80, 12))
 
 
@@ -252,16 +257,20 @@ def test_inner_activity_can_drive_proactive_output(runtime):
     baseline = client.get("/v1/companions/sui/proactivity/output", params=query)
     assert baseline.status_code == 200, baseline.text
     result = app.state.proactivity.process_next()
-    assert result["status"] == "completed"
-    assert len(provider.requests) == 1
-    request = provider.requests[0]
-    assert "PROACTIVE_CONTEXT_DATA" in request.context_text
-    assert "INNER_ACTIVITY_DATA" in request.context_text
-    assert "不是用户发言" in request.context_text
+    assert result["status"] == "awaiting_generation"
+    assert len(provider.requests) == 0
     decisions = client.get("/v1/companions/sui/proactivity/decisions").json()["decisions"]
     assert decisions[0]["origin"] == "inner"
     assert decisions[0]["source_activity_id"] == activity["activity_id"]
-    receipt = client.get(f"/v1/companions/sui/dialogue/{decisions[0]['command_id']}").json()
+    # DSH-owned path: commit the externally generated reply through the route.
+    command_id = decisions[0]["command_id"]
+    commit = client.post(
+        f"/v1/companions/sui/dialogue/{command_id}/commit",
+        json={"assistant_message": "我在，慢慢来。", "usage": None},
+    )
+    assert commit.status_code == 200, commit.text
+    assert commit.json()["status"] == "completed"
+    receipt = client.get(f"/v1/companions/sui/dialogue/{command_id}").json()
     assert receipt["assistant_message"] == "我在，慢慢来。"
     output = client.get(
         "/v1/companions/sui/proactivity/output",
@@ -339,7 +348,22 @@ def test_model_assisted_judge_records_bounded_audit(model_runtime):
     assert current["model"]["output_tokens"] == 30
     assert current["model"]["rationale"].startswith("对话与低唤醒")
     assert current["content"] == provider.judge["content"]
+    assert current["thinking"] is None
     assert client.get("/v1/companions/sui/inner-life/activities").json()["items"][0] == current
+    client.post("/v1/companions/sui/personality/preview", json={"user_message": "继续吧"})
+
+
+def test_model_assisted_judge_records_reasoning(model_runtime):
+    client, app, clock, provider, state = model_runtime
+    provider.inner_reasoning = "(inner voice) 我感觉到一点担心，但不想打扰。"
+    send(client, state, "one", "谢谢你陪我读书")
+    provider.requests.clear()
+    clock.value += timedelta(minutes=20)
+    observe(client, clock)
+    assert app.state.inner_life.tick() == 1
+    current = client.get("/v1/companions/sui/inner-life").json()["current"]
+    assert current["generator"] == "model_v1"
+    assert current["thinking"] == "(inner voice) 我感觉到一点担心，但不想打扰。"
     preview = client.post(
         "/v1/companions/sui/personality/preview", json={"user_message": "继续吧"}
     ).json()

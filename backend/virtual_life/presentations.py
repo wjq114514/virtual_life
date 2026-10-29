@@ -58,8 +58,15 @@ class NativeOutputItem(BaseModel):
     sequence: int = Field(ge=0)
     event_id: Identifier
     command_id: Identifier
-    assistant_message: str
+    assistant_message: str | None = None
     created_at: str
+    # DSH-owned path: the urge is exposed instead of a finished reply.
+    candidate_id: Identifier | None = None
+    boundary: str | None = None
+    origin: str | None = None
+    status: str = "completed"
+    reason_text: str | None = None
+    context_text: str | None = None
 
 
 class NativeOutputPage(BaseModel):

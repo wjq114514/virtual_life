@@ -176,7 +176,15 @@ def test_schedule_tool_uses_two_rounds_and_later_fires(tmp_path):
             == 200
         )
         result = app.state.proactivity.process_next()
-        assert result["status"] == "completed", result
+        assert result["status"] == "awaiting_generation", result
+        # DSH-owned path: commit the externally generated reply through the route.
+        decision = client.get("/v1/companions/sui/proactivity/decisions").json()["decisions"][-1]
+        commit = client.post(
+            f"/v1/companions/sui/dialogue/{decision['command_id']}/commit",
+            json={"assistant_message": "买牛奶，好的。", "usage": None},
+        )
+        assert commit.status_code == 200, commit.text
+        assert commit.json()["status"] == "completed"
         decision = client.get("/v1/companions/sui/proactivity/decisions").json()["decisions"][-1]
         assert decision["origin"] == "schedule"
     finally:
@@ -251,15 +259,25 @@ def test_schedule_task_tool_persists_fires_and_is_idempotent(tmp_path):
             == 200
         )
         result = app.state.proactivity.process_next()
-        assert result["status"] == "completed", result
+        assert result["status"] == "awaiting_generation", result
+        task = client.get("/v1/companions/sui/scheduled-tasks").json()["items"][0]
+        assert task["status"] in ("queued", "pending")  # queued while running, pending once parked
+        decision = client.get("/v1/companions/sui/proactivity/decisions").json()["decisions"][-1]
+        assert decision["origin"] == "task"
+        assert decision["scheduled_task_id"] == task["task_id"]
+        # DSH-owned path: commit the externally generated reply through the route.
+        commit = client.post(
+            f"/v1/companions/sui/dialogue/{decision['command_id']}/commit",
+            json={"assistant_message": "买牛奶，好的。", "usage": None},
+        )
+        assert commit.status_code == 200, commit.text
+        assert commit.json()["status"] == "completed"
         task = client.get("/v1/companions/sui/scheduled-tasks").json()["items"][0]
         assert task["status"] == "completed"
         assert task["reason"] == "completed"
         assert task["candidate_id"]
         decision = client.get("/v1/companions/sui/proactivity/decisions").json()["decisions"][-1]
-        assert decision["origin"] == "task"
-        assert decision["scheduled_task_id"] == task["task_id"]
-        assert "买牛奶" in provider.requests[-1].context_text
+        assert decision["status"] == "completed"
     finally:
         client.close()
 

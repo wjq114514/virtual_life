@@ -104,6 +104,7 @@ class InnerActivity(RequestModel):
     source_event_id: Identifier | None = None
     generator: InnerActivityGenerator = "rules_v1"
     model: InnerModelInfo | None = None
+    thinking: str | None = Field(default=None, max_length=2048)
     status: InnerActivityStatus
     created_at: str
     expires_at: str
@@ -155,6 +156,7 @@ _SCHEMA = (
         source_event_id TEXT,
         generator TEXT NOT NULL DEFAULT 'rules_v1',
         model_json TEXT,
+        thinking TEXT,
         status TEXT NOT NULL,
         created_at TEXT NOT NULL,
         expires_at TEXT NOT NULL)""",
@@ -259,6 +261,8 @@ class InnerLifeService:
                 )
             if "model_json" not in columns:
                 connection.execute("ALTER TABLE inner_activities ADD COLUMN model_json TEXT")
+            if "thinking" not in columns:
+                connection.execute("ALTER TABLE inner_activities ADD COLUMN thinking TEXT")
 
     def attach_model(self, provider, model_name: str) -> None:
         self.provider = provider
@@ -508,6 +512,11 @@ class InnerLifeService:
             model=(
                 InnerModelInfo.model_validate(json.loads(row["model_json"]))
                 if "model_json" in row.keys() and row["model_json"] is not None
+                else None
+            ),
+            thinking=(
+                row["thinking"]
+                if "thinking" in row.keys() and row["thinking"] is not None
                 else None
             ),
             status=row["status"],
@@ -810,6 +819,7 @@ class InnerLifeService:
         if judge is None or judge["confidence"] < self.policy.model_min_confidence:
             return local
         weight = self.policy.model_weight
+        reasoning = getattr(answer, "reasoning", "") or ""
         return {
             "kind": judge["kind"],
             "salience": round(
@@ -818,6 +828,7 @@ class InnerLifeService:
             "urge": round(_clamp((1 - weight) * job["urge"] + weight * judge["urge"]), 6),
             "generator": "model_v1",
             "content": judge.get("content"),
+            "thinking": reasoning[:2048] if reasoning else None,
             "model": {
                 "model": self.model_name,
                 "input_tokens": usage.input_tokens,
@@ -874,8 +885,8 @@ class InnerLifeService:
             """INSERT INTO inner_activities
                 (activity_id, companion_id, kind, trigger, content, salience, urge,
                  attention_session_id, attention_boundary_id, context_version,
-                 source_event_id, generator, model_json, status, created_at, expires_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)""",
+                 source_event_id, generator, model_json, thinking, status, created_at, expires_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)""",
             (
                 job["activity_id"],
                 job["companion_id"],
@@ -890,6 +901,7 @@ class InnerLifeService:
                 event["event_id"],
                 judgment["generator"],
                 _json(judgment["model"]) if judgment["model"] is not None else None,
+                judgment.get("thinking"),
                 created_at,
                 expires_at,
             ),

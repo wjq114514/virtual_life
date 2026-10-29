@@ -315,6 +315,8 @@ class _ChatStream:
         self.usage: ModelUsage | None = None
         self.text: list[str] = []
         self.text_bytes = 0
+        self.reasoning: list[str] = []
+        self.reasoning_bytes = 0
         self.calls: dict[int, dict[str, str]] = {}
         self.total = 0
         self.buffer = bytearray()
@@ -486,6 +488,17 @@ class _ChatStream:
                 raise ProviderError(
                     "model_callback_error", "Model draft delivery failed", usage=self.usage
                 ) from None
+        reasoning = delta.get("reasoning_content")
+        if reasoning is not None:
+            if not isinstance(reasoning, str) or not reasoning:
+                self.fail()
+            try:
+                self.reasoning_bytes += len(reasoning.encode("utf-8"))
+            except UnicodeError:
+                self.fail()
+            if self.reasoning_bytes > 65536:
+                self.fail("model_response_too_large")
+            self.reasoning.append(reasoning)
         reason = choice.get("finish_reason")
         # Some compatible endpoints use an empty string on unfinished chunks.
         if reason is not None and reason != "":
@@ -648,6 +661,9 @@ class CompatibleChatProvider:
             if not isinstance(message, dict):
                 raise ValueError
             text = message.get("content")
+            reasoning = message.get("reasoning_content")
+            if reasoning is not None and not isinstance(reasoning, str):
+                raise ValueError
             tool_calls = _response_tool_calls(message.get("tool_calls")) if request.tools else ()
             if tool_calls:
                 if text is not None and (not isinstance(text, str) or text.strip()):
@@ -664,7 +680,13 @@ class CompatibleChatProvider:
                 "model_usage_missing", "Model provider did not return valid token usage"
             )
         # Use the requested model identity; upstream strings are untrusted metadata.
-        return ModelResult(text=text, model=request.model, usage=usage, tool_calls=tool_calls)
+        return ModelResult(
+            text=text,
+            model=request.model,
+            usage=usage,
+            tool_calls=tool_calls,
+            reasoning=reasoning or "",
+        )
 
     def stream(self, request: ModelRequest, on_delta: Callable[[str], None]) -> ModelResult:
         """Deliver drafts immediately; return only after explicit billing and completion."""
@@ -761,6 +783,7 @@ class CompatibleChatProvider:
             model=request.model,
             usage=state.usage,
             tool_calls=state.final_tool_calls(),
+            reasoning="".join(state.reasoning),
         )
 
     def embed(self, request: EmbeddingRequest) -> EmbeddingResult:

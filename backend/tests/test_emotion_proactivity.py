@@ -49,21 +49,33 @@ def test_correction_during_proactive_generation_discards_and_settles_usage(runti
     budget_before = app.state.memory.budget_snapshot("sui")["spent_tokens"]
     observe(runtime)
     assert decisions(runtime)[-1]["status"] == "queued"
-    provider.action = lambda: clarify(runtime, turn["accepted_event_id"])
+    # DSH-owned path: the turn parks at awaiting_generation and the correction
+    # happens between park and commit, so the externally committed reply is
+    # discarded at _finalize.
     result = app.state.proactivity.process_next()
-    assert result["status"] == "discarded"
+    assert result["status"] == "awaiting_generation"
+    clarify(runtime, turn["accepted_event_id"])
+    command_id = decisions(runtime)[-1]["command_id"]
+    commit = client.post(
+        f"/v1/companions/sui/dialogue/{command_id}/commit",
+        json={"assistant_message": "歇一会儿，我在。", "usage": None},
+    )
+    assert commit.status_code == 200, commit.text
+    assert commit.json()["status"] == "discarded"
     decision = decisions(runtime)[-1]
+    assert decision["status"] == "discarded"
     receipt = client.get("/v1/companions/sui/dialogue/" + decision["command_id"]).json()
     assert receipt["assistant_message"] is None
-    assert receipt["usage"]["input_tokens"] == 80
-    assert receipt["usage"]["output_tokens"] == 12
-    assert app.state.memory.budget_snapshot("sui")["spent_tokens"] == budget_before + 92
+    assert receipt["discard_reason"]
+    assert app.state.memory.budget_snapshot("sui")["spent_tokens"] == budget_before
     events = client.get("/v1/events?limit=500").json()["events"]
     assert not any(event["type"] == "companion.proactive_completed" for event in events)
     after = client.get("/v1/companions/sui/emotion/experiences").json()["items"]
     assert [item["event_id"] for item in after] == [item["event_id"] for item in before]
     assert after[0]["status"] == "corrected"
-    assert len(provider.requests) == 2
+    # Only the initial user turn used the local provider; the proactive turn was
+    # DSH-owned (external) and never invoked it.
+    assert len(provider.requests) == 1
 
 
 def test_direction_clears_emotion_quiet_but_explicit_mode_still_gates(runtime):

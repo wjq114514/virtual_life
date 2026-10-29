@@ -39,7 +39,18 @@ def complete(runtime):
     policy(runtime)
     observe(runtime)
     result = runtime[1].state.proactivity.process_next()
-    assert result["status"] == "completed", result
+    # DSH-owned path: the turn parks at awaiting_generation, then DSH commits the
+    # reply through the dialogue commit route, resolving the candidate to
+    # completed. Complete the round trip here so the output channel sees a
+    # finished reply with an assistant_message.
+    assert result["status"] == "awaiting_generation", result
+    command_id = test_proactivity.decisions(runtime)[0]["command_id"]
+    commit = runtime[0].post(
+        f"/v1/companions/sui/dialogue/{command_id}/commit",
+        json={"assistant_message": "歇一会儿，我在。", "usage": None},
+    )
+    assert commit.status_code == 200, commit.text
+    assert commit.json()["status"] == "completed"
     return result
 
 
@@ -58,7 +69,7 @@ def test_subscription_baseline_and_current_output_without_new_model_calls(runtim
     assert item["sequence"] <= page["next_sequence"]
     assert poll(runtime, page["next_sequence"]).json()["items"] == []
     assert poll(runtime).json()["items"] == []
-    assert len(runtime[3].requests) == 1
+    assert len(runtime[3].requests) == 0
     assert result["candidate_id"]
 
 
@@ -66,7 +77,7 @@ def test_new_access_cannot_receive_previous_access_output_even_with_old_cursor(r
     complete(runtime)
     subscribe(runtime)
     assert poll(runtime, 0).json()["items"] == []
-    assert len(runtime[3].requests) == 1
+    assert len(runtime[3].requests) == 0
 
 
 def test_receipt_commit_before_candidate_status_update_still_delivers(runtime):
@@ -134,7 +145,7 @@ def test_changed_context_discards_output_and_advances_cursor(runtime, change):
     assert response.status_code == 200, response.text
     assert response.json()["items"] == []
     assert response.json()["next_sequence"] > cursor
-    assert len(runtime[3].requests) == 1
+    assert len(runtime[3].requests) == 0
 
 
 def test_state_expiry_without_revision_change_invalidates_output(runtime):
@@ -176,7 +187,7 @@ def test_interrupted_remark_never_replays_after_attention_recovers(runtime, chan
     response = poll(runtime, cursor)
     assert response.status_code == 200, response.text
     assert response.json()["items"] == []
-    assert len(runtime[3].requests) == 1
+    assert len(runtime[3].requests) == 0
 
 
 @pytest.mark.parametrize(
@@ -200,7 +211,7 @@ def test_current_access_and_ownership_are_required(runtime, change):
                 "UPDATE companions SET lease_expires_at=NULL WHERE companion_id='sui'"
             )
     assert poll(runtime, cursor, **overrides).status_code == 409
-    assert len(runtime[3].requests) == 1
+    assert len(runtime[3].requests) == 0
 
 
 def test_output_authentication_and_cursor_validation(runtime):

@@ -19,7 +19,7 @@ from pydantic import (
     model_validator,
 )
 
-from .coordinator import DomainError
+from .coordinator import DomainError, _instant
 from .emotion import EmotionSnapshot
 from .memory import MemoryError, TokenCount
 from .model_provider import ProviderError, estimate_chat_input_tokens
@@ -48,6 +48,11 @@ _TOOL_RESULT_TOKENS = 256
 # deadline the reservation is released and the command is discarded, so an agent
 # that dies mid-turn cannot starve the companion's budget.
 _COMMIT_TTL_SECONDS = 300
+
+# Rapid user turns within the debounce window are absorbed: the companion replies
+# once (to the first message) and later turns return a silent receipt without a
+# provider call. This is a leading-edge, non-blocking suppression.
+_DEBOUNCE_EVENT = "companion.dialogue_received"
 
 
 def strip_speaker_prefix(text: str, companion_name: str) -> str:
@@ -227,6 +232,7 @@ class DialogueService:
         model_router=None,
         scene_classifier=None,
         clock=None,
+        debounce_seconds: float = 0.0,
     ) -> None:
         self.coordinator = coordinator
         self.personality_service = personality_service
@@ -245,8 +251,10 @@ class DialogueService:
         self.clock = clock or coordinator.clock
         self.store = coordinator.store
         self.proactivity_gate = None
+        self.proactive_finalized = None
         self.voice_service = None
         self.tool_runtime = None
+        self.debounce_seconds = debounce_seconds
         paths = {
             self.store.database_path,
             personality_service.store.database_path,
@@ -292,6 +300,33 @@ class DialogueService:
             if row is None:
                 raise DialogueError(404, "not_found", "Dialogue command was not found")
             return self._read(row)
+
+    def _debounced(self, connection, companion_id, now: datetime, exclude_sequence: int) -> bool:
+        """Leading-edge suppression: absorb rapid user turns.
+
+        Returns True when a newer accepted user dialogue event falls inside the
+        configured debounce window, so this turn should reply silently instead of
+        dispatching a model call. The window is measured from the most recent
+        ``companion.dialogue_received`` event before ``now``; the current event
+        (already emitted by the caller) is excluded by its sequence.
+        """
+        window = self.debounce_seconds
+        if window <= 0:
+            return False
+        row = connection.execute(
+            """SELECT occurred_at FROM events
+            WHERE companion_id = ? AND type = ?
+            AND sequence < ?
+            ORDER BY sequence DESC LIMIT 1""",
+            (companion_id, _DEBOUNCE_EVENT, exclude_sequence),
+        ).fetchone()
+        if row is None:
+            return False
+        try:
+            last = _instant(row["occurred_at"])
+        except (ValueError, TypeError):
+            return False
+        return now - last < timedelta(seconds=window)
 
     def history(
         self, companion_id: str, before_sequence: int | None = None, limit: int = 20
@@ -618,8 +653,15 @@ class DialogueService:
                     raise DialogueError(
                         409, "dialogue_context_changed", "A newer user event was accepted"
                     )
+            # Internal generation needs a local provider. External generation is
+            # the DSH-owned path: it parks the turn and returns the assembled
+            # prompt, so it never touches the local provider and must be allowed
+            # even when no local model is configured (VL as pure data plane).
             if self.provider is None or not self.model_name.strip():
-                raise DialogueError(503, "model_not_configured", "Dialogue model is not configured")
+                if request.generator != "external":
+                    raise DialogueError(
+                        503, "model_not_configured", "Dialogue model is not configured"
+                    )
             preview_payload = {key: data[key] for key in PersonalityPreview.model_fields}
             preview = self.prompt_builder.preview(
                 *snapshots,
@@ -817,7 +859,24 @@ class DialogueService:
                 created_at=created_at,
                 accepted_event_id=received["event_id"],
             )
-            if preview["participation"]["respond"]:
+            # Leading-edge debounce: absorb rapid follow-up turns so the companion
+            # replies once to the first message and later turns in the window are
+            # acknowledged silently without a provider call. The check runs only
+            # for ordinary user dialogue (never proactive/voice) and only when a
+            # reply would otherwise be dispatched.
+            debounced = False
+            if (
+                not proactive
+                and not voice_request
+                and preview["participation"]["respond"]
+                and self.debounce_seconds > 0
+            ):
+                with self.store.transaction() as connection:
+                    if self._debounced(connection, companion_id, self._now(), received["sequence"]):
+                        debounced = True
+                        result.status = "silent"
+                        result.discard_reason = "debounced"
+            if preview["participation"]["respond"] and not debounced:
                 tool_context = (
                     request.max_output_tokens + _TOOL_RESULT_TOKENS if tool_definitions else 0
                 )
@@ -1269,6 +1328,10 @@ class DialogueService:
                 },
                 connection=connection,
             )
+        if proactive and self.proactive_finalized is not None:
+            self.proactive_finalized(
+                companion_id, request.candidate_id, request.command_id, result.status
+            )
         return receipt
 
     def _park(self, companion_id, request, *, proactive, snapshots, result, task_id):
@@ -1290,6 +1353,25 @@ class DialogueService:
                     request.command_id,
                 ),
             )
+            if proactive:
+                # Emit a park event so the proactive-output channel can expose the
+                # urge (reason_text + assembled context) while DSH generates the
+                # reply. commit_turn later resolves the candidate through
+                # `proactive_finalized` and emits `companion.proactive_completed`.
+                self.coordinator._emit(
+                    connection,
+                    self._now(),
+                    "companion.proactive_parked",
+                    {
+                        "command_id": request.command_id,
+                        "candidate_id": request.candidate_id,
+                        "node_id": request.node_id,
+                        "epoch": request.epoch,
+                    },
+                    companion_id=companion_id,
+                    node_id=request.node_id,
+                    recipient_node_id=request.node_id,
+                )
         return receipt
 
     def _expire(self, companion_id, command_id, pending, stored):
@@ -1312,6 +1394,16 @@ class DialogueService:
                 command_id=command_id,
                 details={"error_code": "dialogue_commit_expired"},
                 connection=connection,
+            )
+        # Resolve a parked proactive candidate so it is not left in flight.
+        if pending.get("proactive") and self.proactive_finalized is not None:
+            request = pending.get("request") or {}
+            self.proactive_finalized(
+                companion_id,
+                request.get("candidate_id"),
+                command_id,
+                "discarded",
+                reason="dialogue_commit_expired",
             )
         raise DialogueError(409, "dialogue_commit_expired", "The parked turn expired before commit")
 

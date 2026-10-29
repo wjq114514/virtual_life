@@ -85,6 +85,7 @@ class ModelResult:
     usage: ModelUsage
     metadata: Mapping[str, object] = field(default_factory=dict)
     tool_calls: Sequence[ToolCall] = ()
+    reasoning: str = ""
 
 
 @dataclass(frozen=True, slots=True)
