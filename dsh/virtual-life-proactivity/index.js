@@ -66,6 +66,20 @@ async function renewLease(baseUrl, token, companionId, nodeId, epoch) {
   });
 }
 
+async function openAccess(baseUrl, token, nodeId, label) {
+  return runtimeFetch(baseUrl, token, `/v1/nodes/access/web`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      browser_id: 'dsh-poller',
+      access_id: `dsh-access-${Date.now().toString(36)}`,
+      label,
+      kind: 'desktop',
+      bind_node_id: nodeId,
+    }),
+  });
+}
+
 async function deliver(ctx, cfg, args, sessionId) {
   if (!ctx.schedule) throw new Error('the schedule service is not available in this profile');
   const { companionId, nodeId, accessId } = args;
@@ -82,8 +96,24 @@ async function deliver(ctx, cfg, args, sessionId) {
     }
     try {
       await heartbeatAccess(cfg.baseUrl, cfg.token, nodeId, accessId);
-    } catch {
-      // A stale access is recreated by re-installing with a fresh accessId.
+    } catch (error) {
+      // A stale access (TTL expired while dsh-web was down) is recreated here so
+      // the poller self-heals instead of erroring every tick. The new access id
+      // replaces the configured one in this process; the next heartbeat uses it.
+      if (String(error.message).includes('node_access_expired') || String(error.message).includes('404')) {
+        try {
+          const opened = await openAccess(cfg.baseUrl, cfg.token, nodeId, 'DSH poller');
+          const freshAccess = opened.access_id || opened.accessId;
+          if (freshAccess) {
+            // Drop the stale cursor so the fresh access re-opens a clean
+            // subscription, then adopt the new access id for this and later ticks.
+            cursors.delete(cursorKey);
+            args.accessId = freshAccess;
+          }
+        } catch {
+          // If recreation fails (node offline), let the poll report the error.
+        }
+      }
     }
   }
   if (!args.skipLease) {
@@ -114,7 +144,25 @@ async function deliver(ctx, cfg, args, sessionId) {
       scheduled.push({ event_id: item.event_id, message: item.assistant_message, scheduled: false });
       continue;
     }
-    const prompt = `${cfg.delivery.promptPrefix}${item.assistant_message}`;
+    // The runtime surfaces a DSH-owned urge (status=awaiting_generation) with a
+    // reason_text and the assembled context instead of a finished reply. The DSH
+    // model generates the reply here and commits it through the dialogue commit
+    // route; delivery is the urge, not the answer. Embed the command_id so the
+    // model knows which parked turn to commit.
+    let prompt;
+    if (item.status === 'awaiting_generation') {
+      const urge = item.reason_text || '';
+      const context = item.context_text || '';
+      prompt = `${cfg.delivery.promptPrefix}${urge}\n\n`
+        + `[PROACTIVE_COMMAND]\ncommand_id: ${item.command_id}\n`
+        + `companion_id: ${companionId}\n`
+        + `这是虚拟伙伴的一个自主冲动。请结合下方上下文，用自然、简短的方式替它回应；`
+        + `然后用 dialogue commit 接口（companions_companion_id_dialogue_command_id_commit）`
+        + `把回复提交到 command_id，不要声称执行了用户未确认的外部操作。\n\n`
+        + `[PROACTIVE_CONTEXT]\n${context}`;
+    } else {
+      prompt = `${cfg.delivery.promptPrefix}${item.assistant_message}`;
+    }
     const record = await ctx.schedule.create(sessionId, {
       title: cfg.delivery.title,
       prompt,

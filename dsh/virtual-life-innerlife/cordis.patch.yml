@@ -1,0 +1,20 @@
+# Inner-life consumer bridge for the Virtual Life companion runtime.
+#
+# The runtime decides *when* an inner activity is due (rules) and, in model
+# mode, produces the activity with a thinking channel (`thinking`). This plugin
+# is the DSH-side consumer: it polls the inner-life activity channel, surfaces
+# the newest model-generated thinking as a labeled bounded context block, and
+# exposes tools so the model can inspect the inner-life snapshot and pull the
+# next activity as an independent turn. It complements the proactivity delivery
+# driver (which carries the *spoken* proactive messages) by carrying the
+# *inner monologue* the runtime captured.
+- insert:
+    - id: virtual-life-innerlife
+      name: '@virtuallife/dsh-virtual-life-innerlife'
+      config:
+        baseUrl: http://127.0.0.1:8038
+        token: local-dev-token
+        companionId: proact-demo
+        refreshMs: 30000
+        maxContextChars: 3000
+        order: 230

@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Virtual Life Inner Life",
+    "description": "Polls the Virtual Life companion's inner-life activity channel (including the model's captured thinking / inner monologue) and surfaces it as a bounded labeled context block, plus inspection and activity-page tools."
+  }
+}
