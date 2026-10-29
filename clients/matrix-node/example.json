@@ -1,0 +1,25 @@
+{
+  "server_url": "http://127.0.0.1:8038",
+  "token_env": "VIRTUAL_LIFE_API_TOKEN",
+  "node_id": "matrix-room",
+  "label": "Matrix 房间",
+  "homeserver": "https://matrix.example.org",
+  "user_id": "@bot:matrix.example.org",
+  "auth_method": "password",
+  "password": "your_password_here",
+  "device_name": "virtual-life-matrix-node",
+  "rooms": [
+    {
+      "room": "!roomid:matrix.example.org",
+      "companion": "sui"
+    }
+  ],
+  "interval_seconds": 30,
+  "sync_timeout_ms": 30000,
+  "request_timeout_seconds": 10,
+  "max_history": 6,
+  "max_output_tokens": 512,
+  "e2ee": false,
+  "e2ee_sidecar": null,
+  "e2ee_config": null
+}

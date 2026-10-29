@@ -1,0 +1,8 @@
+# Local runtime configuration (never commit; contains server addresses and tokens).
+config.local.json
+__pycache__/
+*.pyc
+
+# E2EE sidecar: node_modules and the generated per-run config.
+e2ee/node_modules/
+e2ee/sidecar.config.json
