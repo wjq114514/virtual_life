@@ -42,6 +42,9 @@ webui_session_days = 30
 [model]
 # base_url 与 name 必须同时填写或同时留空。
 # 留空时仍可查看记忆和本地预览人格提示。
+# DSH 全权模式（VL 无本地 provider）：留空后 internal 生成返回 503
+# model_not_configured，但 external 生成（park+commit）仍可用——VL 只做
+# 数据面（去重/裁剪/ROI/记忆/情绪/内心/输出通道），不碰模型调用。
 base_url = ""
 name = ""
 api_key = ""
@@ -140,6 +143,11 @@ proactive_urge_threshold = 0.65
 proactive_min_idle_seconds = 1200
 idle_saturation_seconds = 1800
 max_history = 200
+
+[dialogue]
+# 前缘抑制式消息防抖：窗口内后续用户消息被吸收、只回复一次（silent），
+# 不消耗模型调用；0 表示关闭。用于合并短时间连续输入。
+debounce_seconds = 0.0
 model_assisted = false
 model_min_interval_seconds = 3600
 model_daily_limit = 24

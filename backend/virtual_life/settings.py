@@ -76,6 +76,7 @@ _CONFIG_SECTIONS = {
     },
     "proactivity": {"poll_seconds": "proactivity_poll_seconds"},
     "inner_life": {"poll_seconds": "inner_life_poll_seconds"},
+    "dialogue": {"debounce_seconds": "dialogue_debounce_seconds"},
     "tools": {
         "enabled": "tools_enabled",
         "max_calls_per_turn": "tools_max_calls_per_turn",
@@ -222,6 +223,7 @@ _NUMBER_FIELDS = (
     "embedding_query_cache_ttl_seconds",
     "rerank_timeout_seconds",
 )
+_NONNEGATIVE_NUMBER_FIELDS = ("dialogue_debounce_seconds",)
 _WEIGHT_FIELDS = ("rerank_rrf_weight",)
 
 
@@ -566,6 +568,7 @@ class Settings:
     auto_memory_output_tokens: int = 1200
     proactivity_poll_seconds: float = 2.0
     inner_life_poll_seconds: float = 10.0
+    dialogue_debounce_seconds: float = 0.0
     tools_enabled: bool = False
     tools_max_calls_per_turn: int = 1
     tools_plugins: tuple[str, ...] = ()
@@ -636,6 +639,15 @@ class Settings:
         for name in _NUMBER_FIELDS:
             if not _finite_positive(getattr(self, name)):
                 raise ValueError(f"{name} must be a finite positive number")
+        for name in _NONNEGATIVE_NUMBER_FIELDS:
+            value = getattr(self, name)
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(value)
+                or value < 0
+            ):
+                raise ValueError(f"{name} must be a finite nonnegative number")
         if not self.server_host.strip() or len(self.server_host) > 255:
             raise ValueError("Server host must contain 1 to 255 characters")
         if not 1 <= self.server_port <= 65535:
@@ -923,6 +935,7 @@ class Settings:
                         setting_name in _NUMBER_FIELDS
                         or setting_name in _WEIGHT_FIELDS
                         or setting_name == "embedding_similarity_threshold"
+                        or setting_name in _NONNEGATIVE_NUMBER_FIELDS
                     ):
                         kind = float
                     else:
