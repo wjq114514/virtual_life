@@ -75,6 +75,10 @@ _SCHEMA = (
         created_at TEXT NOT NULL, job_id TEXT NOT NULL)""",
     """CREATE INDEX IF NOT EXISTS auto_memory_derivative_scope
         ON auto_memory_derivatives(companion_id,kind,created_at)""",
+    """CREATE TABLE IF NOT EXISTS auto_memory_external (
+        job_id TEXT PRIMARY KEY, companion_id TEXT NOT NULL, context_json TEXT NOT NULL,
+        source_event_ids TEXT NOT NULL, created_at TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'parked',
+        deadline_at TEXT, result_json TEXT, error_code TEXT)""",
 )
 
 
@@ -292,12 +296,16 @@ class AutoMemoryService:
         graph_max_hops=2,
         graph_candidate_limit=512,
         birthday_reminder=None,
+        external=False,
+        external_timeout_seconds=300.0,
     ):
         self.memory = memory_service
         self.provider = provider
         self.model_name = model_name
         self.enabled = enabled
         self.birthday_reminder = birthday_reminder
+        self.external = external
+        self.external_timeout_seconds = external_timeout_seconds
         if not 1 <= batch_size <= 32 or not 0 <= max_wait_seconds <= 86400:
             raise ValueError("Invalid automatic memory batch configuration")
         if not 1 <= output_token_limit <= 64000:
@@ -715,6 +723,20 @@ class AutoMemoryService:
             if not valid:
                 self.memory.release_model_tokens(companion_id, job_id)
                 return self._finish(job_id, "discarded", "source_invalid")
+            if self.external:
+                # Park for external generation: the DSH-side generator produces
+                # the Extraction and commits it through commit_external under
+                # the same gates. The reservation stays held for the commit.
+                self._park_external(job_id, companion_id, rows, events, context, usage, estimated)
+                with self.memory._connection() as connection:
+                    job_result = self._job_result(connection, job_id)
+                return {
+                    "job_id": job_id,
+                    "status": "awaiting_generation",
+                    "error_code": None,
+                    "usage": usage,
+                    **job_result,
+                }
             answer = self.provider.complete(
                 ModelRequest(
                     task_id=job_id,
@@ -734,38 +756,7 @@ class AutoMemoryService:
             reserved = False
             if not isinstance(answer.text, str) or len(answer.text) > 65536:
                 raise ValueError("Invalid extraction size")
-            output = Extraction.model_validate_json(answer.text)
-            sources = {event["event_id"]: event["payload"]["user_message"] for event in events}
-            for item in output.memories:
-                if (
-                    item.source_event_id not in sources
-                    or item.evidence not in sources[item.source_event_id]
-                ):
-                    raise ValueError("Evidence must be an exact user quote")
-                if (
-                    item.kind == "fact"
-                    and item.retention_policy == "auto"
-                    and item.semantic_key
-                    and re.search(
-                        r"(?:^|[:._/-])(?:birthday|birth_date|date_of_birth|生日|出生日期)$",
-                        _normalize(item.semantic_key),
-                    )
-                    and not _birthday_evidence(item.evidence)
-                ):
-                    # An arbitrary model slot cannot make unrelated quoted text permanent.
-                    item.retention_policy = "stable"
-            if any(item.memory_index >= len(output.memories) for item in output.relations):
-                raise ValueError("Relation requires a stable memory")
-            keys = {}
-            for item in output.memories:
-                if (
-                    item.semantic_key
-                    and item.semantic_key in keys
-                    and keys[item.semantic_key] != _normalize(item.content)
-                ):
-                    raise ValueError("Ambiguous semantic key in one extraction")
-                if item.semantic_key:
-                    keys[item.semantic_key] = _normalize(item.content)
+            output = self._validate_extraction(answer.text, events)
             return self._commit(job_id, companion_id, rows, output, usage)
         except ProviderError as exc:
             try:
@@ -801,6 +792,227 @@ class AutoMemoryService:
                 "usage_unknown" if reserved else "invalid_extraction",
                 usage,
             )
+
+    def _validate_extraction(self, text, events):
+        """Parse and evidence-validate one Extraction payload.
+
+        Shared by the in-process provider path and the external commit path so
+        an externally generated extraction passes exactly the same evidence,
+        birthday-slot, relation and semantic-key gates.
+        """
+        if not isinstance(text, str) or len(text) > 65536:
+            raise ValueError("Invalid extraction size")
+        output = Extraction.model_validate_json(text)
+        sources = {event["event_id"]: event["payload"]["user_message"] for event in events}
+        for item in output.memories:
+            if (
+                item.source_event_id not in sources
+                or item.evidence not in sources[item.source_event_id]
+            ):
+                raise ValueError("Evidence must be an exact user quote")
+            if (
+                item.kind == "fact"
+                and item.retention_policy == "auto"
+                and item.semantic_key
+                and re.search(
+                    r"(?:^|[:._/-])(?:birthday|birth_date|date_of_birth|生日|出生日期)$",
+                    _normalize(item.semantic_key),
+                )
+                and not _birthday_evidence(item.evidence)
+            ):
+                # An arbitrary model slot cannot make unrelated quoted text permanent.
+                item.retention_policy = "stable"
+        if any(item.memory_index >= len(output.memories) for item in output.relations):
+            raise ValueError("Relation requires a stable memory")
+        keys = {}
+        for item in output.memories:
+            if (
+                item.semantic_key
+                and item.semantic_key in keys
+                and keys[item.semantic_key] != _normalize(item.content)
+            ):
+                raise ValueError("Ambiguous semantic key in one extraction")
+            if item.semantic_key:
+                keys[item.semantic_key] = _normalize(item.content)
+        return output
+
+    def _park_external(self, job_id, companion_id, rows, events, context, usage, estimated):
+        """Park a job for external generation.
+
+        The worker keeps the model-token reservation, records the assembled
+        context and source identities, and returns a receipt the external
+        generator is expected to commit through ``commit_external`` before the
+        deadline. Idempotent: a second park for the same job returns the stored
+        row unchanged.
+        """
+        now = self.memory._timestamp(self.memory._now())
+        deadline = self.memory._timestamp(
+            self.memory._now() + timedelta(seconds=self.external_timeout_seconds)
+        )
+        with self.memory._connection(write=True) as connection:
+            existing = connection.execute(
+                "SELECT * FROM auto_memory_external WHERE job_id=?", (job_id,)
+            ).fetchone()
+            if existing is not None:
+                return self._external_receipt(connection, existing)
+            connection.execute(
+                "INSERT INTO auto_memory_external(job_id,companion_id,context_json,"
+                "source_event_ids,created_at,status,deadline_at) VALUES(?,?,?,?,?,'parked',?)",
+                (
+                    job_id,
+                    companion_id,
+                    _json(context),
+                    _json([event["event_id"] for event in events]),
+                    now,
+                    deadline,
+                ),
+            )
+            row = connection.execute(
+                "SELECT * FROM auto_memory_external WHERE job_id=?", (job_id,)
+            ).fetchone()
+            return self._external_receipt(connection, row)
+
+    def _external_receipt(self, connection, row):
+        return {
+            "job_id": row["job_id"],
+            "companion_id": row["companion_id"],
+            "status": row["status"],
+            "created_at": row["created_at"],
+            "deadline_at": row["deadline_at"],
+            "source_event_ids": json.loads(row["source_event_ids"]),
+            "context": json.loads(row["context_json"]),
+        }
+
+    def reap_external(self, limit=100):
+        """Discard parked external jobs whose commit deadline passed.
+
+        Runs on the worker loop so a generator that dies mid-flight cannot hold
+        a reservation forever. Releasing the reservation is safe only when the
+        job is still parked (the external commit path settles it first).
+        """
+        if not self.external:
+            return 0
+        now = self.memory._timestamp(self.memory._now())
+        # Snapshot the expired rows first, then release the write lock before
+        # touching reservation/job tables through their own connections.
+        with self.memory._connection() as connection:
+            rows = connection.execute(
+                "SELECT job_id,companion_id FROM auto_memory_external "
+                "WHERE status='parked' AND deadline_at<=? LIMIT ?",
+                (now, limit),
+            ).fetchall()
+        reaped = 0
+        for row in rows:
+            with self.memory._connection() as connection:
+                job = connection.execute(
+                    "SELECT status FROM auto_memory_jobs WHERE job_id=?",
+                    (row["job_id"],),
+                ).fetchone()
+                parked = connection.execute(
+                    "SELECT status FROM auto_memory_external WHERE job_id=?",
+                    (row["job_id"],),
+                ).fetchone()
+                if job is None or job["status"] != "running" or parked is None:
+                    connection.execute(
+                        "UPDATE auto_memory_external SET status='reaped',error_code='commit_expired' "
+                        "WHERE job_id=?",
+                        (row["job_id"],),
+                    )
+                    continue
+            try:
+                self.memory.release_model_tokens(row["companion_id"], row["job_id"])
+            except MemoryError:
+                pass
+            self._finish(row["job_id"], "failed", "external_commit_expired")
+            with self.memory._connection(write=True) as connection:
+                connection.execute(
+                    "UPDATE auto_memory_external SET status='reaped',error_code='commit_expired' "
+                    "WHERE job_id=?",
+                    (row["job_id"],),
+                )
+            reaped += 1
+        return reaped
+
+    def commit_external(self, companion_id, job_id, result_text, usage=None):
+        """Commit an externally generated Extraction to a parked job.
+
+        Idempotent: a job already committed, reaped, or finished returns its
+        stored result instead of writing a second extraction. Revalidates the
+        parked job's sources and runs the exact ``_commit`` provenance gates.
+        """
+        companion_id = self.memory._identifier(companion_id, "companion_id")
+        job_id = self.memory._identifier(job_id, "job_id")
+        with self.memory._connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM auto_memory_external WHERE job_id=?", (job_id,)
+            ).fetchone()
+            if row is None or row["companion_id"] != companion_id:
+                raise MemoryError(404, "not_found", "Parked external job was not found")
+            if row["status"] == "reaped" or (
+                row["status"] == "parked"
+                and row["deadline_at"]
+                and row["deadline_at"] <= self.memory._timestamp(self.memory._now())
+            ):
+                raise MemoryError(
+                    409,
+                    "auto_memory_commit_expired",
+                    "The parked external job expired before commit",
+                )
+            if row["status"] == "committed":
+                return {"job_id": job_id, "status": "completed", "already_committed": True}
+            events = [
+                json.loads(event_row["payload_json"])
+                for event_row in connection.execute(
+                    "SELECT payload_json FROM auto_memory_queue WHERE job_id=? ORDER BY created_at,event_id",
+                    (job_id,),
+                ).fetchall()
+            ]
+            rows = connection.execute(
+                "SELECT * FROM auto_memory_queue WHERE job_id=? ORDER BY created_at,event_id",
+                (job_id,),
+            ).fetchall()
+            source_valid = all(self._source_valid(connection, row) for row in rows)
+        if not source_valid:
+            try:
+                self.memory.release_model_tokens(companion_id, job_id)
+            except MemoryError:
+                pass
+            self._finish(job_id, "discarded", "source_invalid")
+            with self.memory._connection(write=True) as connection:
+                connection.execute(
+                    "UPDATE auto_memory_external SET status='discarded',error_code='source_invalid' "
+                    "WHERE job_id=?",
+                    (job_id,),
+                )
+            return {"job_id": job_id, "status": "discarded", "error_code": "source_invalid"}
+        output = self._validate_extraction(result_text, events)
+        counts = (usage.get("input_tokens"), usage.get("output_tokens")) if usage else (0, 0)
+        if any(type(count) is not int or not 0 <= count <= 1_000_000_000 for count in counts):
+            raise ValueError("Invalid usage")
+        settled = {"input_tokens": counts[0], "output_tokens": counts[1]}
+        self.memory.settle_model_tokens(companion_id, job_id, settled)
+        result = self._commit(job_id, companion_id, rows, output, settled)
+        with self.memory._connection(write=True) as connection:
+            connection.execute(
+                "UPDATE auto_memory_external SET status='committed',result_json=? WHERE job_id=?",
+                (_json(result), job_id),
+            )
+        return result
+
+    def external_pending(self, companion_id=None):
+        """List parked external jobs (diagnostics / poller cursor)."""
+        with self.memory._connection() as connection:
+            if companion_id is None:
+                rows = connection.execute(
+                    "SELECT * FROM auto_memory_external WHERE status='parked' ORDER BY created_at"
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    "SELECT * FROM auto_memory_external WHERE status='parked' AND companion_id=? "
+                    "ORDER BY created_at",
+                    (companion_id,),
+                ).fetchall()
+        return [self._external_receipt(connection, row) for row in rows]
 
     def _commit(self, job_id, companion_id, sources, output, usage):
         with self.memory.logs.correlate(job_id=job_id):

@@ -1,0 +1,27 @@
+# Automatic-memory extraction bridge for the Virtual Life companion runtime.
+#
+# The runtime's automatic-memory worker generates a compact memory *summary*
+# (facts / preferences / relationships plus a short narrative) from recent
+# dialogue. By default the runtime calls its own model for that extraction.
+# This bundle moves the *generation* step to DSH: the runtime parks the job
+# (auto_memory_external, status=parked) and this plugin polls the parked jobs,
+# asks the DSH LLM to produce the Extraction JSON, and commits the result back
+# through the runtime's external-commit route. The runtime keeps provenance,
+# evidence, birthday-slot, relation and stale-source gates; DSH only writes the
+# body of the extraction.
+- insert:
+    - id: virtual-life-automemory
+      name: '@virtuallife/dsh-virtual-life-automemory'
+      config:
+        baseUrl: http://127.0.0.1:8038
+        token: local-dev-token
+        companionId: proact-demo
+        # Provider/model for the extraction call. Leave empty to inherit the
+        # profile's agent-default-model (provider sensenova, model
+        # sensenova-6.8-flash-lite).
+        provider: sensenova
+        model: sensenova-6.8-flash-lite
+        pollMs: 30000
+        maxTokens: 1200
+        maxPerPoll: 1
+        order: 240

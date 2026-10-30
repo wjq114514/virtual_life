@@ -1,0 +1,8 @@
+{
+  "name": "virtual-life-automemory",
+  "description": "自动记忆摘要生成桥：轮询 VL 已停驻的外部生成任务，用 DSH 模型生成提取 JSON 并提交回 VL。",
+  "poll": "轮询已停驻的自动记忆任务",
+  "generate": "生成记忆提取",
+  "commit": "提交提取",
+  "status": "查看自动记忆外部任务状态"
+}

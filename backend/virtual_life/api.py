@@ -314,6 +314,13 @@ class DelegationRequest(BaseModel):
     agent: str | None = Field(default=None, max_length=64)
 
 
+class AutoMemoryExternalCommitRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    extraction_text: str = Field(min_length=1, max_length=65_536)
+    input_tokens: int = Field(ge=0, le=1_000_000_000)
+    output_tokens: int = Field(ge=0, le=1_000_000_000)
+
+
 def create_app(
     settings: Settings | None = None,
     *,
@@ -408,6 +415,8 @@ def create_app(
         output_token_limit=settings.auto_memory_output_tokens,
         graph_max_hops=settings.graph_max_hops,
         graph_candidate_limit=settings.graph_candidate_limit,
+        external=settings.auto_memory_external,
+        external_timeout_seconds=settings.auto_memory_external_timeout_seconds,
     )
     memory.automatic_memory = automatic_memory
     vector_provider = embedding_provider
@@ -632,6 +641,13 @@ def create_app(
                 await asyncio.to_thread(automatic_memory.process_next)
             except Exception:
                 logger.exception("Automatic memory processing failed")
+            # Reclaim parked external jobs whose commit deadline passed so a
+            # generator that dies mid-flight cannot hold a reservation forever.
+            if settings.auto_memory_external:
+                try:
+                    await asyncio.to_thread(automatic_memory.reap_external, 100)
+                except Exception:
+                    logger.exception("Automatic memory external reaping failed")
             # Sweep derivatives whose sources are no longer live so the table
             # does not accumulate rows that recall already hides. Stale
             # summaries are rebuilt from their surviving sources rather than
@@ -1884,6 +1900,44 @@ def create_app(
     ) -> dict:
         coordinator.get_companion(companion_id)
         return automatic_memory.list_jobs(companion_id, limit=limit, offset=offset)
+
+    @router.get(
+        "/companions/{companion_id}/memories/automation/external/pending",
+        tags=["memory"],
+        description="List parked external generation jobs awaiting a DSH-side commit.",
+    )
+    def memory_automation_external_pending(companion_id: str) -> dict:
+        coordinator.get_companion(companion_id)
+        pending = automatic_memory.external_pending(companion_id)
+        return {"items": pending, "count": len(pending)}
+
+    @router.post(
+        "/companions/{companion_id}/memories/automation/external/{job_id}/commit",
+        tags=["memory"],
+        description=(
+            "Commit an externally generated memory extraction to a parked "
+            "automatic-memory job. The extraction passes the same evidence, "
+            "birthday-slot, relation and provenance gates as an in-process run."
+        ),
+    )
+    def memory_automation_external_commit(
+        companion_id: str,
+        job_id: str,
+        body: AutoMemoryExternalCommitRequest,
+    ) -> dict:
+        coordinator.get_companion(companion_id)
+        try:
+            return automatic_memory.commit_external(
+                companion_id,
+                job_id,
+                body.extraction_text,
+                usage={
+                    "input_tokens": body.input_tokens,
+                    "output_tokens": body.output_tokens,
+                },
+            )
+        except ValueError as exc:
+            raise MemoryError(422, "validation_error", str(exc)) from exc
 
     @router.post("/companions/{companion_id}/memories/automation/run", tags=["memory"])
     def run_memory_automation(companion_id: str, body: MemoryAutomationRun) -> dict:

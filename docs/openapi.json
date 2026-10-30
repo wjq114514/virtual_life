@@ -5820,6 +5820,125 @@
         }
       }
     },
+    "/v1/companions/{companion_id}/memories/automation/external/pending": {
+      "get": {
+        "tags": [
+          "memory"
+        ],
+        "summary": "Memory Automation External Pending",
+        "description": "List parked external generation jobs awaiting a DSH-side commit.",
+        "operationId": "memory_automation_external_pending_v1_companions__companion_id__memories_automation_external_pending_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "companion_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Companion Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Memory Automation External Pending V1 Companions  Companion Id  Memories Automation External Pending Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/companions/{companion_id}/memories/automation/external/{job_id}/commit": {
+      "post": {
+        "tags": [
+          "memory"
+        ],
+        "summary": "Memory Automation External Commit",
+        "description": "Commit an externally generated memory extraction to a parked automatic-memory job. The extraction passes the same evidence, birthday-slot, relation and provenance gates as an in-process run.",
+        "operationId": "memory_automation_external_commit_v1_companions__companion_id__memories_automation_external__job_id__commit_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "companion_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Companion Id"
+            }
+          },
+          {
+            "name": "job_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Job Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AutoMemoryExternalCommitRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Memory Automation External Commit V1 Companions  Companion Id  Memories Automation External  Job Id  Commit Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/companions/{companion_id}/memories/automation/run": {
       "post": {
         "tags": [
@@ -7107,6 +7226,36 @@
           "node_id"
         ],
         "title": "AttentionSnapshot"
+      },
+      "AutoMemoryExternalCommitRequest": {
+        "properties": {
+          "extraction_text": {
+            "type": "string",
+            "maxLength": 65536,
+            "minLength": 1,
+            "title": "Extraction Text"
+          },
+          "input_tokens": {
+            "type": "integer",
+            "maximum": 1000000000.0,
+            "minimum": 0.0,
+            "title": "Input Tokens"
+          },
+          "output_tokens": {
+            "type": "integer",
+            "maximum": 1000000000.0,
+            "minimum": 0.0,
+            "title": "Output Tokens"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "extraction_text",
+          "input_tokens",
+          "output_tokens"
+        ],
+        "title": "AutoMemoryExternalCommitRequest"
       },
       "Body_upload_v1_dist_packages_post": {
         "properties": {

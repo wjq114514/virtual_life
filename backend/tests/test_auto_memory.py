@@ -6,7 +6,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from test_memory import Clock
 from virtual_life.auto_memory import AutoMemoryService, _birthday_evidence
-from virtual_life.memory import MemoryService
+from virtual_life.memory import MemoryError, MemoryService
 from virtual_life.ports import ModelResult, ModelUsage
 from virtual_life.storage import SQLiteStore
 
@@ -32,6 +32,24 @@ def environment(tmp_path, batch_size=1):
     provider = Extractor()
     auto = AutoMemoryService(
         memory, provider=provider, model_name="scripted", batch_size=batch_size
+    )
+    memory.automatic_memory = auto
+    return memory, auto, provider, clock
+
+
+def external_environment(tmp_path, batch_size=1, timeout_seconds=300.0):
+    """Environment whose automatic-memory generation is delegated externally."""
+    clock = Clock()
+    memory = MemoryService(tmp_path / "automatic.sqlite", clock=clock)
+    SQLiteStore(memory.database_path)
+    provider = Extractor()
+    auto = AutoMemoryService(
+        memory,
+        provider=provider,
+        model_name="scripted",
+        batch_size=batch_size,
+        external=True,
+        external_timeout_seconds=timeout_seconds,
     )
     memory.automatic_memory = auto
     return memory, auto, provider, clock
@@ -470,3 +488,126 @@ def test_stale_summary_rebuild_re_enqueues_live_sources(tmp_path):
     result = auto.process_next("sui", force=True)
     assert result["status"] == "completed"
     assert len(auto.summaries("sui")["items"]) == 1
+
+
+def test_external_mode_parks_and_awaits_commit(tmp_path):
+    """External mode parks the job and never calls the in-process provider."""
+    memory, auto, provider, clock = external_environment(tmp_path)
+    enqueue(memory, auto, clock, "x1", "我喜欢乌龙茶")
+    result = auto.process_next("sui", force=True)
+    assert result["status"] == "awaiting_generation"
+    assert provider.calls == 0
+    pending = auto.external_pending("sui")
+    assert len(pending) == 1
+    assert pending[0]["status"] == "parked"
+    assert pending[0]["source_event_ids"] == ["x1"]
+    assert "instruction" in pending[0]["context"]
+    # Only the source episode exists; no extracted fact or summary yet.
+    kinds = {r["kind"] for r in memory.list("sui")["items"]}
+    assert "episode" in kinds
+    assert not ({"fact", "summary"} & kinds)
+    assert auto.list_jobs("sui")["items"][0]["status"] == "running"
+
+
+def test_external_commit_writes_under_same_gates(tmp_path):
+    """An external commit passes evidence and provenance gates and settles usage."""
+    memory, auto, provider, clock = external_environment(tmp_path)
+    enqueue(memory, auto, clock, "x1", "我喜欢乌龙茶")
+    result = auto.process_next("sui", force=True)
+    assert result["status"] == "awaiting_generation"
+    job_id = result["job_id"]
+    text = json.dumps(
+        {
+            "memories": [fact("x1", "我喜欢乌龙茶", "preferred_drink")],
+            "summary": "用户喜欢乌龙茶。",
+            "relations": [],
+        },
+        ensure_ascii=False,
+    )
+    committed = auto.commit_external(
+        "sui", job_id, text, usage={"input_tokens": 20, "output_tokens": 10}
+    )
+    assert committed["status"] == "completed"
+    # The extraction landed as a stable fact and a summary derivative.
+    items = memory.list("sui")["items"]
+    assert any(r["kind"] == "fact" and "乌龙茶" in r["content"] for r in items)
+    assert len(auto.summaries("sui")["items"]) == 1
+    # The job is finished and the reservation was settled (not leaked).
+    assert auto.list_jobs("sui")["items"][0]["status"] == "completed"
+    assert auto.external_pending("sui") == []
+
+
+def test_external_commit_rejects_evidence_not_in_sources(tmp_path):
+    """An external extraction referencing an unknown event is rejected."""
+    memory, auto, provider, clock = external_environment(tmp_path)
+    enqueue(memory, auto, clock, "x1", "我喜欢乌龙茶")
+    result = auto.process_next("sui", force=True)
+    job_id = result["job_id"]
+    text = json.dumps(
+        {
+            "memories": [fact("missing", "我没有证据", "preferred_drink")],
+            "summary": "",
+            "relations": [],
+        },
+        ensure_ascii=False,
+    )
+    with pytest.raises(ValueError):
+        auto.commit_external("sui", job_id, text, usage={"input_tokens": 20, "output_tokens": 10})
+    # The parked job is untouched so the generator can retry with a valid body.
+    assert auto.external_pending("sui")[0]["job_id"] == job_id
+
+
+def test_external_commit_idempotent_and_unknown_job(tmp_path):
+    """Committing twice returns the stored result; unknown job is 404."""
+    memory, auto, provider, clock = external_environment(tmp_path)
+    enqueue(memory, auto, clock, "x1", "我喜欢乌龙茶")
+    result = auto.process_next("sui", force=True)
+    job_id = result["job_id"]
+    text = json.dumps(
+        {
+            "memories": [fact("x1", "我喜欢乌龙茶", "preferred_drink")],
+            "summary": "",
+            "relations": [],
+        },
+        ensure_ascii=False,
+    )
+    first = auto.commit_external(
+        "sui", job_id, text, usage={"input_tokens": 20, "output_tokens": 10}
+    )
+    second = auto.commit_external(
+        "sui", job_id, text, usage={"input_tokens": 20, "output_tokens": 10}
+    )
+    assert second["already_committed"] is True
+    assert second["status"] == "completed"
+    assert first["status"] == "completed"
+    with pytest.raises(MemoryError) as exc:
+        auto.commit_external("sui", "am_does_not_exist", text)
+    assert exc.value.status_code == 404
+
+
+def test_external_reap_releases_reservation_after_deadline(tmp_path):
+    """A parked job whose deadline passed is reaped and its reservation released."""
+    memory, auto, provider, clock = external_environment(tmp_path, timeout_seconds=0.001)
+    enqueue(memory, auto, clock, "x1", "我喜欢乌龙茶")
+    result = auto.process_next("sui", force=True)
+    assert result["status"] == "awaiting_generation"
+    job_id = result["job_id"]
+    # Advance the clock past the deadline and reap.
+    clock.value += timedelta(seconds=1)
+    reaped = auto.reap_external()
+    assert reaped == 1
+    assert auto.external_pending("sui") == []
+    assert auto.list_jobs("sui")["items"][0]["status"] == "failed"
+    assert auto.list_jobs("sui")["items"][0]["error_code"] == "external_commit_expired"
+    # A late commit is rejected with 409.
+    text = json.dumps(
+        {
+            "memories": [fact("x1", "我喜欢乌龙茶", "preferred_drink")],
+            "summary": "",
+            "relations": [],
+        },
+        ensure_ascii=False,
+    )
+    with pytest.raises(MemoryError) as exc:
+        auto.commit_external("sui", job_id, text, usage={"input_tokens": 20, "output_tokens": 10})
+    assert exc.value.status_code == 409

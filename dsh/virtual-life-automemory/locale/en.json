@@ -1,0 +1,8 @@
+{
+  "name": "virtual-life-automemory",
+  "description": "Automatic-memory extraction bridge: poll VL parked external jobs, generate the Extraction JSON with the DSH model, and commit it back.",
+  "poll": "Poll parked automatic-memory jobs",
+  "generate": "Generate memory extraction",
+  "commit": "Commit extraction",
+  "status": "Inspect automatic-memory external job state"
+}

@@ -73,6 +73,8 @@ _CONFIG_SECTIONS = {
         "max_wait_seconds": "auto_memory_max_wait_seconds",
         "poll_seconds": "auto_memory_poll_seconds",
         "output_tokens": "auto_memory_output_tokens",
+        "external": "auto_memory_external",
+        "external_timeout_seconds": "auto_memory_external_timeout_seconds",
     },
     "proactivity": {"poll_seconds": "proactivity_poll_seconds"},
     "inner_life": {"poll_seconds": "inner_life_poll_seconds"},
@@ -566,6 +568,16 @@ class Settings:
     auto_memory_max_wait_seconds: float = 60.0
     auto_memory_poll_seconds: float = 2.0
     auto_memory_output_tokens: int = 1200
+    # External generation: when set, summary extraction is not performed by the
+    # in-process provider. The worker parks the job with its assembled context
+    # and a DSH-side generator is expected to produce the Extraction text and
+    # commit it through the auto-memory external route. VL keeps provenance
+    # gating (source validity, duplicate/conflict, tombstone, revision) at
+    # commit. Empty means in-process generation (current behavior).
+    auto_memory_external: bool = False
+    # Maximum minutes a parked external job may wait for its commit before the
+    # worker reclaims it as failed (mirrors the dialogue external timeout).
+    auto_memory_external_timeout_seconds: float = 300.0
     proactivity_poll_seconds: float = 2.0
     inner_life_poll_seconds: float = 10.0
     dialogue_debounce_seconds: float = 0.0
@@ -803,6 +815,15 @@ class Settings:
             raise ValueError("VIRTUAL_LIFE_API_TOKEN must not be empty")
         if type(self.auto_memory_enabled) is not bool:
             raise ValueError("Automatic memory enabled must be a boolean")
+        if type(self.auto_memory_external) is not bool:
+            raise ValueError("Automatic memory external must be a boolean")
+        if (
+            not _finite_positive(self.auto_memory_external_timeout_seconds)
+            or self.auto_memory_external_timeout_seconds > 86400
+        ):
+            raise ValueError(
+                "Automatic memory external timeout must be between 0 and 86400 seconds"
+            )
         if type(self.tools_enabled) is not bool:
             raise ValueError("Tools enabled must be a boolean")
         if (
