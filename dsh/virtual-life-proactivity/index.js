@@ -80,8 +80,49 @@ async function openAccess(baseUrl, token, nodeId, label) {
   });
 }
 
+/**
+ * Ensure the delivery session exists under the configured fixed identity.
+ *
+ * Delivery (`ctx.schedule.create`) resolves the bound Session through
+ * `sessionController.resolveAgent`, which rejects with `session/not-found` when
+ * no such Session is stored. A fixed `sessionId` (e.g. `vl-<companion_id>`) is
+ * what makes proactive delivery survive device changes: the same id is resolved
+ * on every poll. `create({ sessionId })` only *reuses* the id while the Session
+ * is still blank (no `turn/start`); once the Session has turns it stays addressable
+ * by that id for delivery, so we only ever create it once, when it is absent.
+ *
+ * @returns `{ sessionId, created }` where `sessionId` is the identity actually
+ *   usable for delivery (it may differ from the requested one only in the
+ *   create-race case, which we do not retry here).
+ */
+async function ensureSession(ctx, cfg, args, sessionId) {
+  const controller = ctx.get?.('sessionController');
+  if (!controller || typeof controller.resolveAgent !== 'function' || typeof controller.create !== 'function') {
+    throw new Error('sessionController service is not available; cannot ensure the delivery session');
+  }
+  try {
+    // Resolve (cold-resume included) to confirm the fixed Session exists.
+    await controller.resolveAgent(sessionId);
+    return { sessionId, created: false };
+  } catch (error) {
+    // Only a genuinely absent Session is a create trigger; everything else
+    // (subagent ownership, busy, cwd conflict, storage failure) is a real error.
+    const signal = `${error?.code ?? ''} ${error?.message ?? ''}`;
+    if (!/not-found|SESSION_QUERY_SESSION_NOT_FOUND/.test(signal)) throw error;
+  }
+  const preset = args.agentPreset ?? cfg.agentPreset;
+  const value = await controller.create({
+    sessionId,
+    ...(args.cwd ?? cfg.cwd) === void 0 ? {} : { cwd: args.cwd ?? cfg.cwd },
+    ...(preset === void 0 ? {} : { agentPreset: preset }),
+  });
+  return { sessionId: value.sessionId, created: true };
+}
+
 async function deliver(ctx, cfg, args, sessionId) {
   if (!ctx.schedule) throw new Error('the schedule service is not available in this profile');
+  // Ensure the fixed delivery identity exists before arming a delivery into it.
+  await ensureSession(ctx, cfg, args, sessionId);
   const { companionId, nodeId, accessId } = args;
   const cursorKey = `${companionId}|${nodeId}|${accessId}`;
   const companion = await runtimeFetch(
@@ -193,6 +234,10 @@ export function apply(ctx, config) {
     baseUrl: config.baseUrl || 'http://127.0.0.1:8038',
     token: config.token || '',
     keepNodeAlive: config.keepNodeAlive === true,
+    // Optional fixed preset/cwd used when a mapping does not name them; when
+    // both are absent the Session controller falls back to its own defaults.
+    agentPreset: config.agentPreset,
+    cwd: config.cwd,
     poller: { enabled: false, intervalMs: 30000, maxPerPoll: 5, ...(config.poller || {}) },
     delivery: { title: '虚拟伙伴主动参与', promptPrefix: '虚拟伙伴主动想说话：', delaySeconds: 1, ...(config.delivery || {}) },
     sessions: Array.isArray(config.sessions) ? config.sessions : [],

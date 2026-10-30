@@ -26,6 +26,13 @@ into a scheduled independent turn in a DSH session via `ctx.schedule`.
     baseUrl: http://127.0.0.1:8038
     token: local-dev-token
     keepNodeAlive: true        # heartbeat node + web access, renew the output lease
+    # Fixed identity for this companion's DSH delivery session. The poller
+    # resolves it before arming a delivery; if absent it is created blank once
+    # and reused thereafter (see ensureSession in index.js). This is what lets
+    # proactive turns keep landing in the same conversation and survive device
+    # changes.
+    agentPreset: proact-demo
+    cwd: /home/wjqawa/virtual_life
     poller:
       enabled: true
       intervalMs: 6000
@@ -35,11 +42,24 @@ into a scheduled independent turn in a DSH session via `ctx.schedule`.
       promptPrefix: 虚拟伙伴主动想说话：
       delaySeconds: 1
     sessions:
-      - sessionId: session-9cb72bcb-0ab3-4b47-ad52-53de361bad82
+      - sessionId: vl-proact-demo
         companionId: proact-demo
         nodeId: proact-node
         accessId: proact-access-2
 ```
+
+## Fixed session identity
+
+Delivery (`ctx.schedule.create`) resolves the bound Session through
+`sessionController.resolveAgent`, which rejects with `session/not-found` when
+no such Session is stored. The plugin therefore runs `ensureSession` before
+every delivery: it resolves the configured `sessionId`, and only when the
+Session is genuinely absent does it call `sessionController.create({ sessionId,
+cwd, agentPreset })` to create it blank. A fixed id (e.g. `vl-<companion_id>`)
+is what makes proactive delivery survive device changes: the same id is
+resolved on every poll. `create({ sessionId })` only *reuses* the id while the
+Session is still blank (no `turn/start`); once the Session has turns it stays
+addressable by that id for delivery, so the plugin never creates it again.
 
 ## Verified end-to-end flow (2026-10-27)
 
