@@ -20,6 +20,8 @@ python3 qq_node.py --config example.json
 - `websocket_url` 是本进程监听的反向 WS 地址（NapCat 连入）；`http_url` 是 NapCat 的 HTTP 动作服务器地址；`access_token` 是两侧共用的 OneBot 令牌（可空，需与 NapCat 配置一致）。
 - `companions` 是目前绑定的伙伴 ID 列表（每个 QQ 用户映射到列表第一个伙伴）。
 - `test_user_id` 是好友测试消息的固定接收人（QQ 号），避免误发他人。
+- `maintain_node`（可选，默认 `true`）：本客户端是否负责节点的注册与心跳。三角色拆分后置为 `false`，节点在线由 `node-keep` 维持，本客户端只收发消息。
+- `screen_observer_node`（可空）是屏幕观察节点 ID（如 Android 采集节点）。设置后，对话请求会附带 `screen_reference: {node_id: screen_observer_node}`，把该观察节点的最新帧注入本轮对话（屏幕视觉注入）；不设置时对话不携带引用，按旧行为使用对话节点自身的帧（需该节点具备 `vision.capture`）。
 
 OneBot v11 事件映射：
 

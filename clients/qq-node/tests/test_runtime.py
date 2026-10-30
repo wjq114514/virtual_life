@@ -53,6 +53,8 @@ def config(**overrides):
         "request_timeout_seconds": 10,
         "max_history": 6,
         "max_output_tokens": 512,
+        "screen_observer_node": None,
+        "maintain_node": True,
     }
     base.update(overrides)
     return QQConfig(**base)

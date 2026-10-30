@@ -1,0 +1,19 @@
+[Unit]
+Description=Virtual Life adb keeper (server alive + device auto-reconnect + device-state reporting)
+After=network-online.target virtual-life-runtime.service
+Wants=network-online.target virtual-life-runtime.service
+
+[Service]
+Type=simple
+WorkingDirectory=/home/wjqawa/virtual_life
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+Environment=ANDROID_HOME=/home/wjqawa/android-sdk
+Environment=VIRTUAL_LIFE_API_TOKEN=local-dev-token
+ExecStart=/usr/bin/python3 /home/wjqawa/virtual_life/clients/adb-supervisor/adb_keep.py --interval 10 --log-file /home/wjqawa/.local/state/adb-supervisor.log --notify-url http://127.0.0.1:8038 --notify-token ${VIRTUAL_LIFE_API_TOKEN} --observer-node-id adb-observer --observer-label "ADB observer" --state-file /home/wjqawa/.local/state/adb-supervisor-state.json
+Restart=always
+RestartSec=10
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target

@@ -227,12 +227,12 @@ class QQRuntime:
                     self._config.websocket_url,
                     self._config.http_url,
                 )
-                if not self._registered:
+                if not self._registered and self._config.maintain_node:
                     self.register()
                 last_heartbeat = time.monotonic()
                 while not stop.is_set():
                     self.drain_sends()
-                    if time.monotonic() - last_heartbeat >= self._config.interval_seconds:
+                    if self._config.maintain_node and time.monotonic() - last_heartbeat >= self._config.interval_seconds:
                         try:
                             self.heartbeat()
                         except TransportError as exc:

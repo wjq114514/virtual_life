@@ -56,6 +56,32 @@ ports.py 还定义了后续对话编排可使用的 BehaviorPolicy 和 QuietPart
 
 生命体的身份、记忆、当前活动与输出权由主服务器保存。每个设备客户端负责采样和上报；有呈现能力的宿主还负责角色输出。家庭设备无法运行客户端时，网关作为观察者为它报告独立节点状态，报告中同时保留目标 ID 与观察者 ID。
 
+### 客户端二角色拆分
+
+交互客户端（QQ / Matrix / 安卓应用）只负责收发消息与采样；节点**在线**
+与**流转状态**由独立守护进程维护，避免交互客户端重启或空闲导致节点
+掉线、租约过期。由于节点在线（register + heartbeat）与 companion 流转
+（lease / follow / transfer）都属于**节点层面**的状态，二者由同一个
+守护进程维护。
+
+1. **node-keep**（`clients/node-keep/`，纯 stdlib）：一个进程维持一个节点的
+   注册与心跳（`register` + `POST /v1/nodes/{id}/heartbeat`），使
+   `node.online` 恒真；若该节点拥有 companion，还按 `companion` 配置块
+   周期续租（`POST /v1/companions/{id}/lease`），可选驱动 `follow`（迁居）
+   与 `transfer`（三步迁移）。它让对话 gate 的租约检查恒通过，交互客户端
+   发送消息时无需先手动续租。交互客户端通过 `maintain_node: false` 关闭
+   自身的注册与心跳。
+2. **交互客户端**（`clients/qq-node/`、`clients/matrix-node/`、
+   `clients/android-app/`）：只做消息收发 / 屏幕采样与上报，不碰节点在线
+   与流转状态。
+
+两者互补、互不干扰：node-keep 只在节点层面（在线 + 流转），交互客户端
+只在业务消息层面。原 `flow-supervisor` 的职责已并入 node-keep
+（`flow-supervisor.service` 已停止并禁用）。
+
+> 详细的逐层节点状态职责（服务器模型、每个客户端的维护点、交叉与重叠点）
+> 见 [节点状态维护调查](node-state-survey.md)。
+
 设备状态使用 `context.device_state` 保存最新快照，类别变化和显式维护阶段通过观察事件传递。本地 Linux 指标与配置式 TCP / HTTP 探测是第一版适配器；安卓宿主、Home Assistant、OpenWrt 和已有指标系统可随后接入同一约定。详见 [状态协议与接入路线](device-state-tracking.md)。
 
 `node.online` 反映最近收到报告；设备可达性来自具体观察者和端点。用户的操作目标记录为 `subject_node_id`，操作入口记录为 `origin_node_id`。即使她知道用户在维护服务器，`active_node_id` 仍表示手机或电脑上的呈现位置。只有具有输出能力并取得租约的节点能够呈现角色。

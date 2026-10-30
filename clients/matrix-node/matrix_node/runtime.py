@@ -260,7 +260,7 @@ class MatrixRuntime:
         backoff = 1.0
         while not stop.is_set():
             try:
-                if not self._registered:
+                if not self._registered and self._config.maintain_node:
                     self.register()
                 # Re-authenticate if not already logged in (token restored via login()).
                 self._client.login()
@@ -284,7 +284,7 @@ class MatrixRuntime:
                     for event in stream.messages():
                         self._handle_room_message(event)
                     self.drain_sends()
-                    if time.monotonic() - last_heartbeat >= self._config.interval_seconds:
+                    if self._config.maintain_node and time.monotonic() - last_heartbeat >= self._config.interval_seconds:
                         try:
                             self.heartbeat()
                         except TransportError as exc:

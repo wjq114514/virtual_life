@@ -97,6 +97,7 @@ class QQConfig:
     max_history: int
     max_output_tokens: int
     screen_observer_node: str | None
+    maintain_node: bool
 
 
 def load_config(path: Path) -> QQConfig:
@@ -121,6 +122,7 @@ def load_config(path: Path) -> QQConfig:
         "max_history",
         "max_output_tokens",
         "screen_observer_node",
+        "maintain_node",
     }
     data = object_fields(
         source,
@@ -145,6 +147,9 @@ def load_config(path: Path) -> QQConfig:
     screen_observer_node = data.get("screen_observer_node")
     if screen_observer_node is not None:
         screen_observer_node = text(screen_observer_node, limit=128)
+    maintain_node = data.get("maintain_node", True)
+    if not isinstance(maintain_node, bool):
+        raise ConfigError("maintain_node_invalid")
     return QQConfig(
         server_url=safe_url(data["server_url"], server=True),
         token_env=token_env,
@@ -162,6 +167,7 @@ def load_config(path: Path) -> QQConfig:
         max_history=int(number(data.get("max_history", 6), minimum=0, maximum=20)),
         max_output_tokens=int(number(data.get("max_output_tokens", 512), minimum=1, maximum=1024)),
         screen_observer_node=screen_observer_node,
+        maintain_node=maintain_node,
     )
 
 

@@ -21,5 +21,7 @@
   "max_output_tokens": 512,
   "e2ee": false,
   "e2ee_sidecar": null,
-  "e2ee_config": null
+  "e2ee_config": null,
+  "screen_observer_node": null,
+  "maintain_node": false
 }

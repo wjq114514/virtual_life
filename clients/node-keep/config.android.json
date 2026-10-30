@@ -1,0 +1,11 @@
+{
+  "server_url": "http://127.0.0.1:8038",
+  "token_env": "VIRTUAL_LIFE_API_TOKEN",
+  "node_id": "android-9edb439ece7b6fef",
+  "label": "Android 屏幕观察器",
+  "kind": "android",
+  "capabilities": ["attention.observe", "audio.output", "microphone.input", "text.display", "vision.capture"],
+  "context": {"capture": {"source": "android", "state": "live"}},
+  "interval_seconds": 15,
+  "timeout_seconds": 10
+}
