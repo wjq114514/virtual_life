@@ -4,10 +4,13 @@ import android.content.Context
 import android.media.projection.MediaProjection
 import android.os.PowerManager
 import dev.virtuallife.node.ApiException
+import dev.virtuallife.node.AttentionObservation
+import dev.virtuallife.node.AttentionSample
 import dev.virtuallife.node.ClientFeatures
 import dev.virtuallife.node.ClientHash
 import dev.virtuallife.node.HostMetadata
 import dev.virtuallife.node.MonotonicClock
+import dev.virtuallife.node.NodeHeartbeat
 import dev.virtuallife.node.NodeRegistration
 import dev.virtuallife.node.RuntimeApi
 import dev.virtuallife.node.ScreenCommand
@@ -58,6 +61,19 @@ class ServerScreenController(
     @Volatile
     private var session: ScreenSessionReceipt? = null
 
+    @Volatile
+    private var attentionSequence = 0L
+
+    private val attentionSessionId: String = "android-screen-" + UUID.randomUUID().toString()
+
+    @Volatile
+    private var lastAttentionAtMs = 0L
+
+    @Volatile
+    private var lastHeartbeatAtMs = 0L
+
+    private val heartbeatIntervalMs = 15_000L
+
     fun start(mediaProjection: MediaProjection) {
         if (job?.isActive == true) return
         projection = mediaProjection
@@ -81,6 +97,7 @@ class ServerScreenController(
         var capturer: MediaProjectionCapturer? = null
         try {
             registerNode()
+            heartbeatNode()  // node liveness only comes from POST /nodes/{id}/heartbeat
             status.value = "创建屏幕会话…"
             val created = api.createScreenSession(
                 config.nodeId,
@@ -116,6 +133,7 @@ class ServerScreenController(
 
             var sequence = 0L
             while (coroutineContext.isActive) {
+                heartbeatNode()  // keep node online while capture is running
                 val frame = capture.capture()
                 if (frame == null) {
                     status.value = "屏幕不可用（关闭或未就绪）"
@@ -123,6 +141,7 @@ class ServerScreenController(
                     continue
                 }
                 val decision = filter.evaluate(frame.fingerprint, System.currentTimeMillis())
+                reportAttention(decision == FrameDecision.SKIP)
                 if (decision == FrameDecision.SKIP) {
                     delay(interval)
                     continue
@@ -240,6 +259,7 @@ class ServerScreenController(
                     label = "Virtual Life Android",
                     capabilities = listOf(
                         "vision.capture",
+                        "attention.observe",
                         "text.display",
                         "audio.output",
                         "microphone.input",
@@ -248,6 +268,70 @@ class ServerScreenController(
             )
         } catch (error: ApiException) {
             if (error.statusCode != 409) throw error
+        }
+    }
+
+    /**
+     * Keep the node online. Node liveness (online/offline) is computed from
+     * `last_seen_at`, which only POST /nodes/{id}/heartbeat refreshes; frame
+     * uploads and attention observations do not. Without this the node flips to
+     * offline ~60s after registration even while the capture loop is running.
+     * Throttled to once every 15s (well under node_ttl_seconds=60); failures
+     * never break the capture loop.
+     */
+    private suspend fun heartbeatNode() {
+        val nowMs = System.currentTimeMillis()
+        if (nowMs - lastHeartbeatAtMs < heartbeatIntervalMs) return
+        lastHeartbeatAtMs = nowMs
+        try {
+            api.heartbeat(config.nodeId, NodeHeartbeat())
+        } catch (error: Throwable) {
+            // Never let a heartbeat failure kill the capture loop.
+        }
+    }
+
+    /**
+     * Report host state as an ambient attention sample so the runtime can treat
+     * this Android device as an observer room (activity, focus, presence) even
+     * though the companion itself resides on an IM node (QQ/Matrix). Throttled
+     * to at most once per second; failures never break the capture loop.
+     */
+    private suspend fun reportAttention(skippedFrame: Boolean) {
+        val nowMs = System.currentTimeMillis()
+        if (nowMs - lastAttentionAtMs < 1_000) return
+        lastAttentionAtMs = nowMs
+        val interactive = context.getSystemService(PowerManager::class.java)?.isInteractive ?: true
+        val scene = AccessibilitySceneService.latest
+        val activity = ActivityClassifier.classifyActivity(
+            scene?.appId,
+            scene?.className,
+            scene?.windowTitle,
+        )
+        val focus = if (interactive) "focused" else "unfocused"
+        try {
+            api.observeAttention(
+                config.nodeId,
+                AttentionObservation(
+                    commandId = UUID.randomUUID().toString(),
+                    sample = AttentionSample(
+                        sessionId = attentionSessionId,
+                        sequence = attentionSequence,
+                        sampledAt = Instant.now().toString(),
+                        ttlSeconds = 90,
+                        activity = activity,
+                        focus = focus,
+                        availability = if (interactive) "available" else "busy",
+                        userPresent = interactive,
+                        locked = !interactive,
+                        meeting = activity == "meeting",
+                        screenSharing = true,
+                    ),
+                ),
+            )
+            attentionSequence += 1
+        } catch (error: Throwable) {
+            // Ambient state reporting is advisory; a failure here must not kill
+            // the screen-vision capture loop. We simply try again next frame.
         }
     }
 
@@ -298,11 +382,17 @@ class ServerScreenController(
         val scene = AccessibilitySceneService.latest
         val appId = scene?.appId
         val appClass = scene?.className
+        val activity = ActivityClassifier.classifyActivity(
+            appId,
+            appClass,
+            scene?.windowTitle,
+        )
         return HostMetadata(
             locked = !interactive,
             userPresent = interactive,
             appId = appId,
             appClass = appClass,
+            activity = activity,
         )
     }
 

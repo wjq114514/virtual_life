@@ -61,6 +61,23 @@ Point the app at the runtime from the debug build defaults (emulator reaches the
 host at `http://10.0.2.2:8000/` with the local development token). The bearer
 token stays in app-private preferences.
 
+**The preferences file is `shared_prefs/virtual_life.xml`** (the prefs name is
+`"virtual_life"` in `AppConfig.kt`, NOT the default
+`<applicationId>_preferences.xml`). Setting it up for a non-default runtime:
+
+```sh
+# build a prefs XML on the host, then:
+adb push prefs.xml /data/local/tmp/prefs.xml
+adb shell run-as dev.virtuallife.app sh -c \
+  'mkdir -p shared_prefs && cat /data/local/tmp/prefs.xml > shared_prefs/virtual_life.xml'
+# run-as needs the file pushed first (direct heredoc fails on /data/local/tmp perms).
+```
+
+Keys: `base_url` (emulator→host is `http://10.0.2.2:8038/` for the local
+runtime; `:8000` is the README example only), `token` (node reporter token),
+`admin_token` (screen API is admin-token-only), `node_id`
+(`android-<ANDROID_ID>`), `companion_id`. Force-stop and relaunch after writing.
+
 ## What is covered vs. not
 
 Implemented and compiled: node registration, `android` presentation, companion
@@ -79,6 +96,18 @@ uploaded; vision itself always runs on the server. Shizuku capture is **not**
 implemented — MediaProjection is the implemented path, not a claimed Shizuku
 result. Screen sharing is independent from voice: stopping voice leaves screen
 capture alone and vice versa.
+
+To feed a companion that lives on an IM node (QQ/Matrix) rather than on this
+Android node, set the screen session's `companion_id` to that IM companion (in
+`AppConfig`, the `companion_id` preference; the default `android-companion` is
+only a placeholder) and set the IM bridge's `screen_observer_node` to this
+node's `node_id` (default `android-<ANDROID_ID>`). The IM bridge then attaches a
+`screen_reference` to each dialogue turn and the server injects this node's
+fresh frame into the reply. Each submitted frame also carries the classified
+foreground `activity` (and `app_id`) in `host_metadata`, which the server
+surfaces as a short `当前前台应用: <app>（<activity>）` line next to the
+`[screen_image]` marker. The Android node itself stays capture-only (it has
+no output capability, so the companion never migrates onto it).
 
 Not validated here (require a real device and a running server): actual ASR
 accuracy, acoustic echo cancellation, headset routing, telephony/notification

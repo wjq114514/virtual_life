@@ -64,7 +64,7 @@ uv run uvicorn virtual_life.main:app --env-file .env --host 127.0.0.1 --port 800
 | `[server]` | 新启动入口的监听 host、port |
 | `[logging]` | 控制台/文件日志级别、轮转大小与保留数量、HTTP 访问日志 |
 | `[runtime]` | 数据库、API token、节点在线期限、输出租约、迁移期限、房间自动跟随开关与安静窗口、轮询与认证超时、WebUI 会话期限 |
-| `[model]` | Chat Completions 根地址、模型名、密钥、HTTP 超时、额外参数；留空时本地 provider 不构建（`internal` 生成返回 503 `model_not_configured`，`external` 生成仍可 park+commit，DSH 全权模式） |
+| `[model]` | Chat Completions 根地址、模型名、密钥、HTTP 超时、额外参数；留空时本地 provider 不构建（`internal` 生成返回 503 `model_not_configured`，`external` 生成仍可 park+commit，DSH 全权模式）。本地 llama.cpp 推理模型（Qwen3.5-35B 等）须在 `extra_body` 设 `chat_template_kwargs.enable_thinking=false` 才能真正关闭推理链（`thinking.type="disabled"` 对 llama.cpp 无效），否则模型先输出 `reasoning_content` 吃掉对话预算，`content` 为空导致 `model_invalid_response` |
 | `[scene_classifier]` | 本地场景分类器模式（off/observe/route）、模型产物、推理后端、超时与标签到回复模型的映射 |
 | `[automatic_memory]` | 自动记忆开关、批次、最大等待、轮询、输出 token 上限 |
 | `[proactivity]` | 注意力边界与内在活动候选的 poll_seconds，默认 2 秒；开关与限额通过伙伴策略 API 保存 |

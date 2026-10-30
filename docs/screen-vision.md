@@ -11,7 +11,7 @@
 
 明确的未验证项：仓库未附带真实视觉后端的凭证或服务，端到端示例与合同测试使用确定性 fake provider；真实模型识别质量、成本与耗时需在部署环境实测。服务端 OCR、近似重复复用、跨帧 episode、结构化结果流式输出与端侧 UI/OCR 融合均为 P1/P2，尚未实现。
 
-首版 `subject_node_id` 必须等于 `observer_node_id`，且该节点需具备 `vision.capture` 能力。跨设备关联在后续阶段另立合同。
+首版 `subject_node_id` 必须等于 `observer_node_id`，且该节点需具备 `vision.capture` 能力。跨设备关联通过文本对话请求上的 `screen_reference` 完成：会话仍由观察节点创建（`subject_node_id` 必须是该观察节点），而对话请求可携带可选的 `screen_reference {node_id, display_id?}` 指向观察节点。这样同伴可以驻留在无视觉能力的 IM 节点（QQ/Matrix），由独立的 Android 观察节点上报帧；`display_id` 缺省为 `"default"`。省略时使用对话节点本身（旧行为）。该引用只选择读取哪个节点的帧，不授予所有权，也不改变 epoch/lease 门禁。
 
 ## 两种运行模式
 
@@ -48,7 +48,7 @@
 | `reference` | `reference_frame_id`、`reason=client_filtered` | 记录客户端重复声明，不产生新像素证据，不延长证据 TTL |
 | `unavailable` | `reason=locked/permission_denied/user_paused/capture_failed/unknown` | 不附图、不调用模型，立即降级并可观察状态 |
 
-帧可附带 `client_features`（端侧哈希、OCR 块、UI 元素）、`host_metadata`（应用/窗口不透明标识、锁定/在场等布尔）与最多 32 项 `redacted_regions`。客户端摘要只作来源证据，不能替代服务端自算像素摘要。
+帧可附带 `client_features`（端侧哈希、OCR 块、UI 元素）、`host_metadata`（应用/窗口不透明标识、分类 `activity`、锁定/在场等布尔）与最多 32 项 `redacted_regions`。客户端摘要只作来源证据，不能替代服务端自算像素摘要。
 
 ## 状态与分析
 
@@ -278,3 +278,47 @@ uv run python examples/screen_vision_latency.py --single-pass \
 ## 回滚
 
 关闭 `[screen_vision]`（`enabled=false`）并重启即可停止 worker 与新路由，既有业务接口与数据库数据保留；视觉专用表与 `.data/screen-vision` 可单独清理。
+
+## 容器化安卓模拟器（开发/演示环境）
+
+无窗口安卓模拟器跑在 Docker 容器里，用于本地端到端验证（截图→上报→视觉）。主机本身不在 `kvm` 组且 `sudo` 需要密码，但用户属于 `docker` 组，所以用 `--device /dev/kvm` 让容器内 root 获得 KVM 加速；宿主的 NVIDIA Tesla P40 通过手动装载用户态库直通给模拟器的 `-gpu host` 路径，实现真正的 GPU 渲染。
+
+### 为什么这样跑
+
+- **KVM**：`wjqawa` 不在 `kvm` 组，`sudo`/`sg` 都要密码，无法直接用 `/dev/kvm`。`docker run --device /dev/kvm` 让容器内 root 直接打开 KVM（探针 `KVM_GET_API_VERSION=12`）。纯软件模式（`-accel off`）会在无 Qt 平台上崩溃，且 TCG 太慢导致 Watchdog 反复杀 `system_server`。
+- **GPU**：宿主有 NVIDIA Tesla P40（driver 560.35.05），但没有 `nvidia-container-toolkit`。把 NVIDIA 用户态库装进容器 + `__GLX_VENDOR_LIBRARY_NAME=nvidia`，就能让模拟器在 `-gpu host` 下选中 P40。验证：日志 `OpenGL ES 3.0 (4.5.0 NVIDIA 560.35.05)`、`Graphics Adapter Android Emulator OpenGL ES Translator (Tesla P40/PCIe/SSE2)`，截图是真实 1.35MB PNG。
+- **X 显示**：`-gpu host` 的 GLX 路径需要一个可连的 X 显示。复用宿主上已有的 `Xvfb :99`（QQ 在用）及其 `Xauthority`，容器用 `--network host` 共享 netns 即可通过抽象 socket `@/tmp/.X11-unix/X99` 连上。
+
+### 前置条件
+
+- 用户属于 `docker` 组；`emulator` 37.x + `system-images;android-34;google_apis;x86_64` 已通过 `sdkmanager` 安装（`sdkmanager` 需要 `JAVA_HOME` 指向 JDK21+）。
+- AVD `vl_test`（device `pixel_5`）已创建于 `~/.android/avd/`。
+- 宿主 `Xvfb :99` 正在运行（QQ 场景），`Xauthority` 在 `/tmp/xvfb-run.*/Xauthority`。
+- NVIDIA 用户态库已暂存到 `~/.local/share/vl-emulator/nvidia-gpu/`（`lib` 为库+soname 软链，`etc/10_nvidia.json` 为 EGL vendor ICD，`etc/vulkan/icd.d/` 为 Vulkan ICD）。
+
+### 启动脚本
+
+`~/.local/share/vl-emulator/launch-emulator.sh` 封装了完整启动（见文件内注释）。要点：
+
+- 挂载：`--device /dev/kvm /dev/nvidia0 /dev/nvidiactl /dev/nvidia-uvm /dev/nvidia-modeset /dev/dri`；`--network host`；SDK 只读、AVD 可写、NVIDIA 库只读、Xauthority 只读。
+- 环境：`LD_LIBRARY_PATH=/usr/local/lib/nvidia`、`DISPLAY=:99`、`XAUTHORITY=/tmp/xauth-host`、`__GLX_VENDOR_LIBRARY_NAME=nvidia`、`QT_QPA_PLATFORM=offscreen`、`ANDROID_EMULATOR_USE_SYSTEM_LIBS=1`。
+- 命令：`emulator -avd vl_test -read-only -accel on -no-window -no-snapshot -no-audio -no-boot-anim -gpu host`。
+- `-read-only` 是必须的：共享 AVD 挂载会被之前容器留下 `multiinstance.lock`，报 "Running multiple emulators with the same AVD"。启动前清理 `multiinstance.lock` 和 `avd/running/`。
+- `--network host` 必须：docker `-p` NAT 无法到达容器内 loopback 的 adb 5555（模拟器 adb 绑定容器回环），host 网络直接共享 5555/5037/8554。
+
+### 验证清单
+
+1. `docker logs vl-emu | grep -i "boot completed"`（约 60–90s）。
+2. `adb devices` 出现 `emulator-5554 device`。
+3. `adb -s emulator-5554 shell screencap -p /data/local/tmp/s.png && adb pull ...` → 文件大于 ~1MB（真实渲染，不是空帧）。
+4. 日志含 `Tesla P40` 与 `OpenGL ES 3.0 (4.5.0 NVIDIA ...)` 表示 GPU host 生效。
+
+### ARMv8 软件兼容层
+
+`system-images;android-34;google_apis;x86_64` 内置 ARMv8 翻译层（NDK Translation，`libndk_translation.so` + `exec_region` + 代理库 `libEGL`/`GLESv1/v2/v3`/`OpenMAXAL`/`OpenSLES`/`aaudio`/`amidi`，位于 `/system/lib64/`；`ro.dalvik.vm.isa.arm64=x86_64`、`ro.enable.native.bridge.exec=1`）。这意味着 x86_64 镜像可以直接运行 ARM64 的原生库（如某些只有 arm64-v8a 的 `.so`），无需换 arm64 镜像或加装 Houdini。验证方式：`adb shell ls -la /system/lib64/libndk_translation.so`（存在即启用）；日志会打印 `Initialized NDK translation (aarch64)`。注意：翻译层只解决原生库指令集差异，应用仍需 `minSdk` 兼容；arm64 应用经翻译后性能低于原生 x86_64，但对本地端到端视觉验证（截图→上报→llama.cpp 分析）无影响。
+
+### 说明与边界
+
+- 视觉结论本身不依赖 GPU 加速：图像分析走本地 llama.cpp（P40 上的 GGUF+mmproj），模拟器 GPU 只影响渲染流畅度与 3D 应用/游戏测试。无 NVIDIA 时回退 `-gpu swiftshader_indirect` 仍可截图（1.35MB PNG），只是动画更慢。
+- `adb-supervisor.service` 监控 adb 服务器与设备状态，把 `device_state` 观察上报到 `/v1/nodes/adb-observer/observations`；模拟器离线/上线会产生 `changes:[{field:"adb_state", previous, current}]`。
+- 容器 `ubuntu:24.04`（glibc）可用；`alpine`（musl）无法执行模拟器启动器。首次容器启动会 `apt-get install` 一堆 Qt/X11 依赖，耗时约 1–2 分钟。

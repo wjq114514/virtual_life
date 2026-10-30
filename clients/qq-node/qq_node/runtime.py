@@ -138,19 +138,25 @@ class QQRuntime:
             return
         revision = state.get("revision", 0)
         epoch = state.get("epoch", 0)
+        payload: dict[str, Any] = {
+            "command_id": "qq-" + str(uuid.uuid4()),
+            "node_id": self._config.node_id,
+            "epoch": epoch,
+            "expected_revision": revision,
+            "user_message": text[:MAX_MESSAGE_LENGTH],
+            "user_name": str(event.get("nickname", user_id)),
+            "max_output_tokens": self._config.max_output_tokens,
+        }
+        # The companion resides on this QQ node, but the screen may be captured
+        # by a separate observer node (e.g. Android). Name it so the runtime
+        # injects that observer's fresh frames into this dialogue turn.
+        if self._config.screen_observer_node:
+            payload["screen_reference"] = {
+                "node_id": self._config.screen_observer_node,
+                "display_id": "default",
+            }
         try:
-            result = self._api.dialogue(
-                companion,
-                {
-                    "command_id": "qq-" + str(uuid.uuid4()),
-                    "node_id": self._config.node_id,
-                    "epoch": epoch,
-                    "expected_revision": revision,
-                    "user_message": text[:MAX_MESSAGE_LENGTH],
-                    "user_name": str(event.get("nickname", user_id)),
-                    "max_output_tokens": self._config.max_output_tokens,
-                },
-            )
+            result = self._api.dialogue(companion, payload)
         except TransportError as exc:
             LOGGER.warning("dialogue_failed reason=%s", exc.code)
             return

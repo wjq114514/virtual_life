@@ -96,6 +96,7 @@ class QQConfig:
     request_timeout_seconds: float
     max_history: int
     max_output_tokens: int
+    screen_observer_node: str | None
 
 
 def load_config(path: Path) -> QQConfig:
@@ -119,6 +120,7 @@ def load_config(path: Path) -> QQConfig:
         "request_timeout_seconds",
         "max_history",
         "max_output_tokens",
+        "screen_observer_node",
     }
     data = object_fields(
         source,
@@ -140,6 +142,9 @@ def load_config(path: Path) -> QQConfig:
         type(test_user_id) is not int or not 1 <= test_user_id <= 2**63 - 1
     ):
         raise ConfigError("test_user_id_invalid")
+    screen_observer_node = data.get("screen_observer_node")
+    if screen_observer_node is not None:
+        screen_observer_node = text(screen_observer_node, limit=128)
     return QQConfig(
         server_url=safe_url(data["server_url"], server=True),
         token_env=token_env,
@@ -156,6 +161,7 @@ def load_config(path: Path) -> QQConfig:
         ),
         max_history=int(number(data.get("max_history", 6), minimum=0, maximum=20)),
         max_output_tokens=int(number(data.get("max_output_tokens", 512), minimum=1, maximum=1024)),
+        screen_observer_node=screen_observer_node,
     )
 
 

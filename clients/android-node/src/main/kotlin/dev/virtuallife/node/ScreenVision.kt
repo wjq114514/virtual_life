@@ -83,6 +83,7 @@ data class HostMetadata(
     @SerialName("app_id") val appId: String? = null,
     @SerialName("window_id") val windowId: String? = null,
     @SerialName("app_class") val appClass: String? = null,
+    val activity: String? = null,
     val locked: Boolean? = null,
     @SerialName("user_present") val userPresent: Boolean? = null,
     val meeting: Boolean? = null,

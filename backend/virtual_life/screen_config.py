@@ -2,10 +2,18 @@
 
 from dataclasses import dataclass, field
 
+# suggested_long_side tuned on the local Qwen3.5-35B-A3B + mmproj (llama.cpp)
+# vision path: prompt tokens scale with image PIXELS, not bytes.
+#   long_side 768  -> 292 tok  (readable)
+#   long_side 1024 -> 508 tok  (best content / structure)
+#   long_side 1536 -> 1084 tok
+#   long_side 2048 -> 1936 tok
+# Each profile is one step down from the previous default: balanced 1536->1024
+# halves vision tokens with equal-or-better readability for chat turns.
 _PROFILE_ADVICE = {
-    "economy": (2000, 5000, 30000, 1024, 120),
-    "balanced": (1000, 2500, 15000, 1536, 60),
-    "detail": (500, 1000, 8000, 2048, 30),
+    "economy": (2000, 5000, 30000, 768, 120),
+    "balanced": (1000, 2500, 15000, 1024, 60),
+    "detail": (500, 1000, 8000, 1536, 30),
 }
 
 

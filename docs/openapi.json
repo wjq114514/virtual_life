@@ -8017,6 +8017,16 @@
               }
             ],
             "title": "Presentation Id"
+          },
+          "screen_reference": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TextScreenReference"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "additionalProperties": false,
@@ -9443,6 +9453,29 @@
               }
             ],
             "title": "App Class"
+          },
+          "activity": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "code",
+                  "docs",
+                  "chat",
+                  "meeting",
+                  "video",
+                  "game",
+                  "media",
+                  "terminal",
+                  "browser",
+                  "unknown"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Activity"
           },
           "locked": {
             "anyOf": [
@@ -16153,6 +16186,30 @@
           "after"
         ],
         "title": "TextReplacement"
+      },
+      "TextScreenReference": {
+        "properties": {
+          "node_id": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Node Id"
+          },
+          "display_id": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Display Id",
+            "default": "default"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "node_id"
+        ],
+        "title": "TextScreenReference",
+        "description": "Names the observer node whose fresh screen evidence is injected.\n\nThe companion may *reside* on an IM node (QQ/Matrix) that has no vision\ncapability, while a separate Android node captures and reports frames.\n``node_id`` is that observer node; ``display_id`` selects the display.\nWhen omitted the dialogue node itself is used (legacy behaviour)."
       },
       "TraitAdjustment": {
         "properties": {

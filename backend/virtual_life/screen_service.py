@@ -1116,13 +1116,19 @@ class ScreenVisionService:
             + "\n[/screen_evidence]"
         )
 
-    def image_evidence(self, companion_id: str, observer_node_id: str) -> ModelImage | None:
+    def image_evidence(
+        self, companion_id: str, observer_node_id: str
+    ) -> tuple[ModelImage, str | None] | None:
         """Return the latest fresh screen frame for single-pass dialogue.
 
         Unlike :meth:`text_evidence`, this does not require a completed
         ScreenAnalysis. The frame must still be observable, unexpired and not
         fenced by an ``unavailable`` barrier. The image bytes are read after the
         transaction and are never placed in the prompt text.
+
+        Returns ``(image, context)`` where ``context`` is a short sanitized
+        host context line (focused app + classified activity) when the frame
+        carries one, or ``None`` when no fresh frame is available.
         """
         if not self.config.enabled:
             return None
@@ -1131,6 +1137,7 @@ class ScreenVisionService:
         now = self._now()
         path = None
         long_side = 0
+        context = None
         with self.store.transaction() as connection:
             state = connection.execute(
                 """SELECT * FROM screen_states
@@ -1167,6 +1174,7 @@ class ScreenVisionService:
             ):
                 return None
             long_side = self.config.advice(session["requested_profile"])["suggested_long_side"]
+            context = self._host_context(frame["host_metadata_json"])
             image_frame = frame
             if frame["kind"] == "reference":
                 image_frame = connection.execute(
@@ -1202,7 +1210,35 @@ class ScreenVisionService:
             return None
         if not encoded:
             return None
-        return ModelImage(data=encoded, media_type="image/jpeg", detail="high")
+        return ModelImage(data=encoded, media_type="image/jpeg", detail="high"), context
+
+    @staticmethod
+    def _host_context(host_metadata_json: str | None) -> str | None:
+        """Sanitize the frame's host metadata into a short context line.
+
+        Only the focused application and the classified activity are used; both
+        are client-reported, untrusted strings, so each is sanitized. Returns
+        None when neither is present.
+        """
+        if not host_metadata_json:
+            return None
+        try:
+            data = json.loads(host_metadata_json)
+        except (TypeError, ValueError):
+            return None
+        if not isinstance(data, dict):
+            return None
+        app_id = data.get("app_id")
+        activity = data.get("activity")
+        app = sanitize_untrusted(str(app_id), limit=64).strip() if app_id else ""
+        act = sanitize_untrusted(str(activity), limit=32).strip() if activity else ""
+        if not app and not act:
+            return None
+        if app and act:
+            return f"当前前台应用: {app}（{act}）"
+        if app:
+            return f"当前前台应用: {app}"
+        return f"当前前台活动: {act}"
 
     # --------------------------------------------------------------- analysis
     def get_frame(self, observer_node_id: str, frame_id: str) -> dict:

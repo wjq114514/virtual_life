@@ -170,6 +170,7 @@ class HostMetadata(BaseModel):
         Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=128)]
         | None
     ) = None
+    activity: AnalysisActivity | None = None
     locked: bool | None = None
     user_present: bool | None = None
     meeting: bool | None = None

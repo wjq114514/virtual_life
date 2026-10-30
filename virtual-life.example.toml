@@ -52,6 +52,10 @@ timeout_seconds = 60.0
 extra_body = {}
 # 兼容接口示例：填写自己提供商的根地址、模型名与密钥。
 # extra_body = { thinking = { type = "disabled" } }
+# 注意：本地 llama.cpp（Qwen3.5-35B 等推理模型）无法用 thinking.type 关闭推理链，
+# 必须用 chat_template_kwargs.enable_thinking=false；否则模型先输出 reasoning_content
+# 再输出 content，对话预算会被推理吃掉导致 content 为空（model_invalid_response）。
+# extra_body = { chat_template_kwargs = { enable_thinking = false } }
 # extra_body 不能覆盖 model/messages/stream/输出预算/工具/响应格式等执行字段。
 #
 # 本地 MoE 模型服务器（llama.cpp）一键启动：
