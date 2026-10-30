@@ -6,10 +6,8 @@ event-to-dialogue mapping with a mock API + mock Matrix client.
 """
 
 import json
-import threading
 import unittest
 from pathlib import Path
-from urllib.error import HTTPError
 
 from matrix_node.config import ConfigError, load_config
 from matrix_node.e2ee_bridge import E2eeBridge
@@ -38,6 +36,8 @@ CONFIG = {
     "request_timeout_seconds": 10,
     "max_history": 6,
     "max_output_tokens": 512,
+    "screen_observer_node": None,
+    "maintain_node": True,
 }
 
 
@@ -198,9 +198,7 @@ class TestMatrixClient(unittest.TestCase):
         self.assertEqual(result["room_id"], "!room:x")
 
     def test_matrix_error_on_errcode(self):
-        opener = FakeOpener(
-            [_canned({"errcode": "M_UNKNOWN_TOKEN", "error": "bad"}, status=401)]
-        )
+        opener = FakeOpener([_canned({"errcode": "M_UNKNOWN_TOKEN", "error": "bad"}, status=401)])
         client = self._client(opener)
         client._access_token = "tok"
         with self.assertRaises(MatrixError):
@@ -335,6 +333,76 @@ class TestRuntime(unittest.TestCase):
         )
         self.assertEqual(len(api.dialogue_calls), 0)
 
+    def test_sender_filter_allows_and_rejects(self):
+        """A binding with `senders` accepts only those senders."""
+        path = Path("/tmp/mx_runtime_config_sf.json")
+        cfg = dict(CONFIG)
+        cfg["rooms"] = [
+            {
+                "room": "!room1:matrix.example.org",
+                "companion": "sui",
+                "senders": ["@allowed:matrix.example.org"],
+            }
+        ]
+        path.write_text(json.dumps(cfg), encoding="utf-8")
+        config = load_config(path)
+        api = FakeApi()
+        client = FakeMatrix()
+        runtime = MatrixRuntime(config, api, client)
+        # allowed sender -> dialogue
+        runtime._handle_message(
+            {
+                "room_id": "!room1:matrix.example.org",
+                "sender": "@allowed:matrix.example.org",
+                "type": "m.room.message",
+                "content": {"msgtype": "m.text", "body": "你好"},
+            }
+        )
+        self.assertEqual(len(api.dialogue_calls), 1)
+        # disallowed sender -> ignored
+        runtime._handle_message(
+            {
+                "room_id": "!room1:matrix.example.org",
+                "sender": "@blocked:matrix.example.org",
+                "type": "m.room.message",
+                "content": {"msgtype": "m.text", "body": "hi"},
+            }
+        )
+        self.assertEqual(len(api.dialogue_calls), 1)
+
+    def test_sender_filter_absent_accepts_all(self):
+        """No `senders` on a binding -> any non-self sender accepted."""
+        runtime, api, _ = self._runtime()
+        runtime._handle_message(
+            {
+                "room_id": "!room1:matrix.example.org",
+                "sender": "@anyone:matrix.example.org",
+                "type": "m.room.message",
+                "content": {"msgtype": "m.text", "body": "你好"},
+            }
+        )
+        self.assertEqual(len(api.dialogue_calls), 1)
+
+    def test_config_senders_validation(self):
+        path = Path("/tmp/mx_runtime_config_sv.json")
+        cfg = dict(CONFIG)
+        cfg["rooms"] = [
+            {"room": "!room1:matrix.example.org", "companion": "sui", "senders": ["@a:x", "@a:x"]}
+        ]
+        path.write_text(json.dumps(cfg), encoding="utf-8")
+        with self.assertRaises(ConfigError):
+            load_config(path)
+
+    def test_config_senders_not_string_rejected(self):
+        path = Path("/tmp/mx_runtime_config_sn.json")
+        cfg = dict(CONFIG)
+        cfg["rooms"] = [
+            {"room": "!room1:matrix.example.org", "companion": "sui", "senders": [1, 2]}
+        ]
+        path.write_text(json.dumps(cfg), encoding="utf-8")
+        with self.assertRaises(ConfigError):
+            load_config(path)
+
     def test_attention_sample_sequence_monotonic(self):
         runtime, _, _ = self._runtime()
         s1 = runtime._attention_sample(user_present=True)
@@ -389,6 +457,58 @@ class TestRuntime(unittest.TestCase):
         self.assertEqual(runtime._e2ee.sent, [("!room1:matrix.example.org", "回复")])
         self.assertEqual(client.sent, [])
 
+    def test_sidecar_verification_sas_surfaced(self):
+        """SAS emoji/decimal events are surfaced and stored on the runtime."""
+        runtime, api, _ = self._runtime()
+        bridge = _FakeBridge()
+        runtime._e2ee = bridge
+        runtime._e2ee.on_message(runtime._on_sidecar_message)
+        runtime._e2ee.on_verification(runtime._on_sidecar_verification)
+        bridge.emit_verification(
+            {
+                "event": "verification",
+                "state": "sas",
+                "transaction_id": "$txn",
+                "emoji": [["🐶", "Dog"], ["🚀", "Rocket"]],
+                "decimal": [128, 256, 512],
+            }
+        )
+        state = runtime.verification_state()
+        self.assertIsNotNone(state)
+        self.assertEqual(state["state"], "sas")
+        self.assertEqual(state["transaction_id"], "$txn")
+        self.assertEqual(len(state["emoji"]), 2)
+
+    def test_sidecar_verification_confirm_routes_to_bridge(self):
+        runtime, api, _ = self._runtime()
+        bridge = _FakeBridge()
+        runtime._e2ee = bridge
+        runtime._e2ee.on_message(runtime._on_sidecar_message)
+        runtime._e2ee.on_verification(runtime._on_sidecar_verification)
+        bridge.emit_verification(
+            {"event": "verification", "state": "sas", "transaction_id": "$txn"}
+        )
+        runtime.verification_confirm("$txn")
+        self.assertEqual(bridge.verification_commands, [("confirm", "$txn")])
+
+    def test_sidecar_verification_done_clears(self):
+        runtime, api, _ = self._runtime()
+        bridge = _FakeBridge()
+        runtime._e2ee = bridge
+        runtime._e2ee.on_message(runtime._on_sidecar_message)
+        runtime._e2ee.on_verification(runtime._on_sidecar_verification)
+        bridge.emit_verification(
+            {"event": "verification", "state": "done", "transaction_id": "$txn"}
+        )
+        state = runtime.verification_state()
+        self.assertEqual(state["state"], "done")
+
+    def test_verification_unavailable_without_e2ee(self):
+        runtime, api, _ = self._runtime()
+        self.assertIsNone(runtime._e2ee)
+        with self.assertRaises(RuntimeError):
+            runtime.verification_confirm("$txn")
+
     def test_e2ee_bridge_spawns_and_reads_ready(self):
         """E2eeBridge starts a real node sidecar and receives the ready event."""
         sidecar_dir = Path(__file__).resolve().parent.parent / "e2ee"
@@ -412,17 +532,30 @@ class _FakeBridge:
 
     def __init__(self):
         self._handlers = []
+        self._verification_handlers = []
         self.sent = []
+        self.verification_commands = []
 
     def on_message(self, handler):
         self._handlers.append(handler)
+
+    def on_verification(self, handler):
+        self._verification_handlers.append(handler)
 
     def emit(self, event):
         for handler in list(self._handlers):
             handler(event)
 
+    def emit_verification(self, event):
+        for handler in list(self._verification_handlers):
+            handler(event)
+
     def send_command(self, command):
         self.sent.append((command.get("room_id"), command.get("body")))
+
+    def send_verification_command(self, action, transaction_id=None):
+        self.verification_commands.append((action, transaction_id))
+        return {}
 
 
 if __name__ == "__main__":

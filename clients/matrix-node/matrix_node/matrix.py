@@ -169,9 +169,7 @@ class MatrixClient:
         """Send an m.text message. Returns the event_id."""
         txn_id = self._next_txn_id()
         path = f"/_matrix/client/v3/rooms/{quote(room_id, safe='')}/send/m.room.message/{txn_id}"
-        result = self._request(
-            "PUT", path, payload={"msgtype": "m.text", "body": text}, auth=True
-        )
+        result = self._request("PUT", path, payload={"msgtype": "m.text", "body": text}, auth=True)
         event_id = result.get("event_id")
         if not isinstance(event_id, str):
             raise MatrixError("send_event_id_invalid")
@@ -216,11 +214,7 @@ class MatrixClient:
             ) from exc
         except (URLError, OSError) as exc:
             reason = exc.reason if isinstance(exc, URLError) else exc
-            code = (
-                "matrix_timeout"
-                if isinstance(reason, TimeoutError)
-                else "matrix_network_error"
-            )
+            code = "matrix_timeout" if isinstance(reason, TimeoutError) else "matrix_network_error"
             raise MatrixError(code) from exc
         try:
             result = decode_json(raw, max_bytes=MAX_RESPONSE_BYTES, max_depth=32)

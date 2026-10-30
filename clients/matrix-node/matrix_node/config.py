@@ -13,6 +13,7 @@ from .json_utils import JsonError, read_json
 MAX_CONFIG_BYTES = 65_536
 MAX_COMPANIONS = 16
 MAX_ROOMS = 64
+MAX_SENDERS = 64
 
 
 class ConfigError(ValueError):
@@ -83,6 +84,7 @@ def safe_url(value: Any, *, server: bool = False) -> str:
 class RoomBinding:
     room_id: str
     companion_id: str
+    senders: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -103,6 +105,8 @@ class MatrixConfig:
     request_timeout_seconds: float
     max_history: int
     max_output_tokens: int
+    screen_observer_node: str | None
+    maintain_node: bool
     e2ee: bool
     e2ee_sidecar: str | None
     e2ee_config: dict[str, Any] | None
@@ -117,15 +121,32 @@ def _parse_rooms(value: Any) -> tuple[RoomBinding, ...]:
         if not isinstance(item, dict):
             raise ConfigError("rooms_item_invalid")
         entry = object_fields(
-            item, allowed={"room", "companion"}, required={"room", "companion"}
+            item, allowed={"room", "companion", "senders"}, required={"room", "companion"}
         )
         room = text(entry["room"], limit=512)
         companion = text(entry["companion"], limit=128)
         if room in seen_rooms:
             raise ConfigError("rooms_duplicate")
         seen_rooms.add(room)
-        bindings.append(RoomBinding(room_id=room, companion_id=companion))
+        senders = _parse_senders(entry.get("senders"))
+        bindings.append(RoomBinding(room_id=room, companion_id=companion, senders=senders))
     return tuple(bindings)
+
+
+def _parse_senders(value: Any) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, list) or len(value) > MAX_SENDERS:
+        raise ConfigError("senders_out_of_bounds")
+    senders: list[str] = []
+    seen: set[str] = set()
+    for item in value:
+        sender = text(item, limit=512)
+        if sender in seen:
+            raise ConfigError("senders_duplicate")
+        seen.add(sender)
+        senders.append(sender)
+    return tuple(senders)
 
 
 def load_config(path: Path) -> MatrixConfig:
@@ -152,6 +173,8 @@ def load_config(path: Path) -> MatrixConfig:
         "request_timeout_seconds",
         "max_history",
         "max_output_tokens",
+        "screen_observer_node",
+        "maintain_node",
         "e2ee",
         "e2ee_sidecar",
         "e2ee_config",
@@ -182,14 +205,28 @@ def load_config(path: Path) -> MatrixConfig:
     e2ee_sidecar = data.get("e2ee_sidecar")
     if e2ee_sidecar is not None:
         e2ee_sidecar = text(e2ee_sidecar, limit=512)
+    maintain_node = data.get("maintain_node", True)
+    if not isinstance(maintain_node, bool):
+        raise ConfigError("maintain_node_invalid")
     e2ee_config = data.get("e2ee_config")
     if e2ee_config is not None:
         object_fields(
             e2ee_config,
-            allowed={"baseUrl", "userId", "accessToken", "deviceId", "syncTimeoutMs"},
+            allowed={
+                "baseUrl",
+                "userId",
+                "accessToken",
+                "deviceId",
+                "password",
+                "deviceName",
+                "syncTimeoutMs",
+                "bootstrapCrossSigning",
+                "verification",
+                "autoVerify",
+            },
             required=set(),
         )
-        for key in ("baseUrl", "userId", "accessToken"):
+        for key in ("baseUrl", "userId", "accessToken", "password", "deviceName"):
             if key in e2ee_config and not isinstance(e2ee_config[key], str):
                 raise ConfigError("e2ee_config_invalid")
     return MatrixConfig(
@@ -205,12 +242,20 @@ def load_config(path: Path) -> MatrixConfig:
         device_name=text(data.get("device_name", "virtual-life-matrix-node"), limit=128),
         rooms=rooms,
         interval_seconds=number(data.get("interval_seconds", 30), minimum=1, maximum=3600),
-        sync_timeout_ms=int(number(data.get("sync_timeout_ms", 30000), minimum=1000, maximum=60000)),
+        sync_timeout_ms=int(
+            number(data.get("sync_timeout_ms", 30000), minimum=1000, maximum=60000)
+        ),
         request_timeout_seconds=number(
             data.get("request_timeout_seconds", 10), minimum=0.1, maximum=60
         ),
         max_history=int(number(data.get("max_history", 6), minimum=0, maximum=20)),
         max_output_tokens=int(number(data.get("max_output_tokens", 512), minimum=1, maximum=1024)),
+        screen_observer_node=(
+            text(data["screen_observer_node"], limit=128)
+            if data.get("screen_observer_node") is not None
+            else None
+        ),
+        maintain_node=maintain_node,
         e2ee=e2ee,
         e2ee_sidecar=e2ee_sidecar,
         e2ee_config=e2ee_config,

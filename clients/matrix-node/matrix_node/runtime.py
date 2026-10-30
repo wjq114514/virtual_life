@@ -13,7 +13,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from .api import ApiClient, TransportError
-from .config import MatrixConfig
+from .config import MatrixConfig, RoomBinding
 from .matrix import MatrixClient, MatrixError, MatrixEventStream, extract_text
 
 LOGGER = logging.getLogger(__name__)
@@ -49,8 +49,10 @@ class MatrixRuntime:
         self._since: str | None = None
         self._pending_send: dict[str, str] = {}
         self._lock = threading.Lock()
+        self._verification: dict[str, Any] | None = None
         if self._e2ee is not None:
             self._e2ee.on_message(self._on_sidecar_message)
+            self._e2ee.on_verification(self._on_sidecar_verification)
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -99,6 +101,19 @@ class MatrixRuntime:
                 return binding.companion_id
         return None
 
+    def _binding_for(self, room_id: str, sender: str) -> RoomBinding | None:
+        """Return the binding that matches the room and, if the binding
+        restricts senders, the sender. A binding without a `senders` allow-list
+        accepts any sender in the room."""
+        for binding in self._config.rooms:
+            if binding.room_id != room_id:
+                continue
+            if binding.senders and sender not in binding.senders:
+                LOGGER.info("sender_not_allowed room_id=%s sender=%s", room_id, sender)
+                continue
+            return binding
+        return None
+
     # -- Matrix event handling --------------------------------------------
 
     def _handle_message(self, event: dict[str, Any]) -> None:
@@ -111,10 +126,11 @@ class MatrixRuntime:
         text = extract_text(event)
         if not text:
             return
-        companion = self._companion_for(room_id)
-        if companion is None:
+        binding = self._binding_for(room_id, sender)
+        if binding is None:
             LOGGER.info("no_companion room_id=%s", room_id)
             return
+        companion = binding.companion_id
         try:
             state = self._api.get_companion(companion)
         except TransportError as exc:
@@ -171,6 +187,51 @@ class MatrixRuntime:
         }
         self._handle_message(normalized)
 
+    def _on_sidecar_verification(self, event: dict[str, Any]) -> None:
+        """Handle a SAS verification event emitted by the E2EE sidecar.
+
+        We keep the latest SAS state so the operator (or an external driver)
+        can confirm/mismatch/cancel the flow, and log a clear prompt when the
+        emoji/decimal are ready for comparison on another trusted device.
+        """
+        self._verification = event
+        state = event.get("state")
+        if state == "sas":
+            emoji = event.get("emoji") or []
+            decimal = event.get("decimal") or []
+            LOGGER.info(
+                "verification_prompt transaction_id=%s emoji=%s decimal=%s",
+                event.get("transaction_id"),
+                emoji,
+                decimal,
+            )
+        elif state == "done":
+            LOGGER.info("verification_done transaction_id=%s", event.get("transaction_id"))
+        elif state == "cancelled":
+            LOGGER.info(
+                "verification_cancelled transaction_id=%s reason=%s",
+                event.get("transaction_id"),
+                event.get("reason"),
+            )
+
+    def verification_state(self) -> dict[str, Any] | None:
+        """Return the latest SAS verification event (or None)."""
+        return self._verification
+
+    def verification_confirm(self, transaction_id: str | None = None) -> dict[str, Any]:
+        return self._send_verification("confirm", transaction_id)
+
+    def verification_mismatch(self, transaction_id: str | None = None) -> dict[str, Any]:
+        return self._send_verification("mismatch", transaction_id)
+
+    def verification_cancel(self, transaction_id: str | None = None) -> dict[str, Any]:
+        return self._send_verification("cancel", transaction_id)
+
+    def _send_verification(self, action: str, transaction_id: str | None) -> dict[str, Any]:
+        if self._e2ee is None:
+            raise RuntimeError("E2EE not configured; verification unavailable")
+        return self._e2ee.send_verification_command(action, transaction_id)
+
     # -- sending -----------------------------------------------------------
 
     def _send_text(self, room_id: str, text: str) -> None:
@@ -186,9 +247,7 @@ class MatrixRuntime:
         for room_id, text in pending.items():
             try:
                 if self._e2ee is not None:
-                    self._e2ee.send_command(
-                        {"cmd": "send", "room_id": room_id, "body": text}
-                    )
+                    self._e2ee.send_command({"cmd": "send", "room_id": room_id, "body": text})
                 else:
                     self._client.send_text(room_id, text)
             except (MatrixError, OSError) as exc:

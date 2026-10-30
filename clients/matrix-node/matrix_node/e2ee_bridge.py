@@ -16,7 +16,6 @@ import logging
 import os
 import subprocess
 import threading
-import time
 from pathlib import Path
 from typing import Any
 
@@ -41,6 +40,7 @@ class E2eeBridge:
         self._ready = threading.Event()
         self._lock = threading.Lock()
         self._handlers: list[Any] = []
+        self._verification_handlers: list[Any] = []
 
     def _default_command(self) -> list[str]:
         sidecar = self._sidecar_dir / "sidecar.js"
@@ -104,9 +104,15 @@ class E2eeBridge:
                 for handler in list(self._handlers):
                     handler(event)
                 continue
+            if event.get("event") == "verification":
+                for handler in list(self._verification_handlers):
+                    handler(event)
+                continue
             LOGGER.debug("sidecar event: %s", event)
 
-    def send_command(self, command: dict[str, Any], timeout_seconds: float = 30.0) -> dict[str, Any]:
+    def send_command(
+        self, command: dict[str, Any], timeout_seconds: float = 30.0
+    ) -> dict[str, Any]:
         proc = self._proc
         if proc is None or proc.stdin is None:
             raise SidecarError("sidecar not started")
@@ -118,6 +124,22 @@ class E2eeBridge:
 
     def on_message(self, handler: Any) -> None:
         self._handlers.append(handler)
+
+    def on_verification(self, handler: Any) -> None:
+        self._verification_handlers.append(handler)
+
+    def send_verification_command(
+        self, action: str, transaction_id: str | None = None
+    ) -> dict[str, Any]:
+        """Send a SAS verification command to the sidecar.
+
+        Actions: ``confirm`` (user matched the emoji/decimal), ``mismatch``
+        (user saw a mismatch), or ``cancel`` (user declined the flow).
+        """
+        command: dict[str, Any] = {"cmd": "verification", "action": action}
+        if transaction_id is not None:
+            command["transaction_id"] = transaction_id
+        return self.send_command(command)
 
     def stop(self) -> None:
         proc = self._proc
