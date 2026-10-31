@@ -99,19 +99,7 @@ class ServerScreenController(
             registerNode()
             heartbeatNode()  // node liveness only comes from POST /nodes/{id}/heartbeat
             status.value = "创建屏幕会话…"
-            val created = api.createScreenSession(
-                config.nodeId,
-                ScreenSessionCreate(
-                    commandId = UUID.randomUUID().toString(),
-                    companionId = config.companionId,
-                    subjectNodeId = config.nodeId,
-                    displayId = config.displayId,
-                    mode = "continuous",
-                    userInitiated = true,
-                    captureSource = "android_media_projection",
-                    requestedProfile = "balanced",
-                ),
-            )
+            var created = createSession()
             session = created
             status.value = "共享屏幕中"
 
@@ -150,8 +138,24 @@ class ServerScreenController(
                     submitFrame(created, frame, decision, sequence, filter.changeScore(frame.fingerprint))
                     sequence += 1
                 } catch (error: Throwable) {
-                    // Keep only the newest candidate: never queue a backlog of stale screenshots.
-                    status.value = "上传失败，保留最新帧稍后重试: ${error.message}"
+                    if (isSessionExpired(error)) {
+                        // The screen session is a fixed server TTL and frames do not
+                        // extend it. Once it expires every upload 409s, so renew the
+                        // session and keep capturing instead of retrying a dead one.
+                        status.value = "屏幕会话已过期，重建会话…"
+                        runCatching { api.stopScreenSession(
+                            config.nodeId, created.sessionId, ScreenCommand(UUID.randomUUID().toString())
+                        ) }
+                        val renewed = runCatching { createSession() }.getOrNull()
+                        if (renewed == null || !coroutineContext.isActive) break
+                        created = renewed
+                        session = created
+                        sequence = 0
+                        status.value = "共享屏幕中（会话已续期）"
+                    } else {
+                        // Keep only the newest candidate: never queue a backlog of stale screenshots.
+                        status.value = "上传失败，保留最新帧稍后重试: ${error.message}"
+                    }
                 }
                 delay(interval)
             }
@@ -169,6 +173,28 @@ class ServerScreenController(
             if (status.value != "屏幕未共享") status.value = "屏幕未共享"
         }
     }
+
+    private suspend fun createSession(): ScreenSessionReceipt =
+        api.createScreenSession(
+            config.nodeId,
+            ScreenSessionCreate(
+                commandId = UUID.randomUUID().toString(),
+                companionId = config.companionId,
+                subjectNodeId = config.nodeId,
+                displayId = config.displayId,
+                mode = "continuous",
+                userInitiated = true,
+                captureSource = "android_media_projection",
+                requestedProfile = "balanced",
+            ),
+        )
+
+    private fun isSessionExpired(error: Throwable): Boolean =
+        error is ApiException && (
+            error.code == "screen_session_inactive" ||
+                error.code == "screen_generation_conflict" ||
+                error.code == "screen_frame_expired"
+            )
 
     private suspend fun submitFrame(
         session: ScreenSessionReceipt,
