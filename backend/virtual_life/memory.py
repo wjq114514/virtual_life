@@ -524,6 +524,9 @@ class MemoryService:
         connection = sqlite3.connect(self.database_path, timeout=30, isolation_level=None)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
+        # WAL mode: NORMAL is crash-safe (fsync at checkpoint, not per commit);
+        # default FULL fsyncs per commit while holding the write lock → stalls.
+        connection.execute("PRAGMA synchronous = NORMAL")
         connection.create_function(
             "memory_normalize", 1, lambda value: _normalize(value or ""), deterministic=True
         )

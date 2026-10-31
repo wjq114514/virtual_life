@@ -128,11 +128,19 @@ def _safe(value, depth=0):
     return None
 
 
+def _connect(database_path: str, timeout: float = 5.0) -> "sqlite3.Connection":
+    """Open a connection with WAL-safe synchronous=NORMAL (fsync at checkpoint,
+    not per commit) — avoids per-commit fsync write-lock stalls."""
+    connection = sqlite3.connect(database_path, timeout=timeout)
+    connection.execute("PRAGMA synchronous=NORMAL")
+    return connection
+
+
 class MemoryLogService:
     def __init__(self, database_path, clock):
         self.database_path = database_path
         self.clock = clock
-        with sqlite3.connect(database_path) as connection:
+        with _connect(database_path) as connection:
             connection.execute("""CREATE TABLE IF NOT EXISTS memory_logs (
                 sequence INTEGER PRIMARY KEY AUTOINCREMENT,
                 log_id TEXT NOT NULL UNIQUE, companion_id TEXT NOT NULL,
@@ -201,7 +209,7 @@ class MemoryLogService:
         if connection is not None:
             connection.execute(sql, values)
         else:
-            with sqlite3.connect(self.database_path, timeout=1) as owned:
+            with _connect(self.database_path, timeout=1) as owned:
                 owned.execute(sql, values)
         # The message carries safe metadata because standard console formatters
         # commonly discard LogRecord extras. Mutating records are still pending
@@ -261,7 +269,7 @@ class MemoryLogService:
             if value is not None:
                 conditions.append(f"{key} = ?")
                 values.append(value)
-        with sqlite3.connect(self.database_path) as connection:
+        with _connect(self.database_path) as connection:
             connection.row_factory = sqlite3.Row
             rows = connection.execute(
                 "SELECT * FROM memory_logs WHERE "

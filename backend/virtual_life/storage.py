@@ -92,7 +92,11 @@ class SQLiteStore:
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA busy_timeout=30000")
         connection.execute("PRAGMA foreign_keys=ON")
-        connection.execute("PRAGMA synchronous=FULL")
+        # WAL mode: NORMAL is the documented crash-safe setting — fsync only at
+        # checkpoint, not on every commit. FULL fsyncs per commit while holding
+        # the write lock, which under disk contention produces multi-second
+        # write-lock stalls (`database is locked`). See write-lock-stall RCA.
+        connection.execute("PRAGMA synchronous=NORMAL")
         return connection
 
     @contextmanager
