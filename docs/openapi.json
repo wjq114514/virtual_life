@@ -8086,6 +8086,20 @@
             ],
             "title": "Assistant Message"
           },
+          "reply_messages": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reply Messages"
+          },
           "source_event_id": {
             "anyOf": [
               {

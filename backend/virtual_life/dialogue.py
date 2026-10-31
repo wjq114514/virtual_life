@@ -27,6 +27,7 @@ from .models import Identifier, JsonObject
 from .personality import PersonalityError
 from .personality_prompt import PersonalityPreview, PersonalityPreviewResult
 from .ports import ModelRequest, ModelUsage, ToolResult
+from .reply_split import split_reply
 from .scene_classifier.runtime import SceneObservation
 
 logger = logging.getLogger(__name__)
@@ -210,6 +211,10 @@ class DialogueResult(BaseModel):
     status: Literal["completed", "silent", "discarded", "awaiting_generation"]
     discard_reason: str | None = None
     assistant_message: str | None = None
+    # Additive view of assistant_message split into short netizen-style bubbles
+    # for IM clients. Present only for completed replies; None means "send
+    # assistant_message as one message" (the legacy behavior).
+    reply_messages: list[str] | None = None
     source_event_id: Identifier | None = None
     accepted_event_id: Identifier | None = None
     emotion: EmotionSnapshot | None = None
@@ -249,6 +254,9 @@ class DialogueService:
         scene_classifier=None,
         clock=None,
         debounce_seconds: float = 0.0,
+        reply_split_enabled: bool = False,
+        reply_split_max_messages: int = 3,
+        reply_split_max_chars: int = 120,
     ) -> None:
         self.coordinator = coordinator
         self.personality_service = personality_service
@@ -271,6 +279,9 @@ class DialogueService:
         self.voice_service = None
         self.tool_runtime = None
         self.debounce_seconds = debounce_seconds
+        self.reply_split_enabled = reply_split_enabled
+        self.reply_split_max_messages = reply_split_max_messages
+        self.reply_split_max_chars = reply_split_max_chars
         paths = {
             self.store.database_path,
             personality_service.store.database_path,
@@ -1335,6 +1346,16 @@ class DialogueService:
                 )
                 result.emotion = EmotionSnapshot.model_validate(
                     self.emotion_service.snapshot(connection, companion_id, profile, legacy, now)
+                )
+            if (
+                self.reply_split_enabled
+                and result.status == "completed"
+                and result.assistant_message
+            ):
+                result.reply_messages = split_reply(
+                    result.assistant_message,
+                    max_messages=self.reply_split_max_messages,
+                    max_chars=self.reply_split_max_chars,
                 )
             receipt = result.model_dump(mode="json")
             connection.execute(

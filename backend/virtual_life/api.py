@@ -477,6 +477,9 @@ def create_app(
         screen_service=screen_vision,
         scene_classifier=scene_classifier,
         debounce_seconds=settings.dialogue_debounce_seconds,
+        reply_split_enabled=settings.dialogue_reply_split_enabled,
+        reply_split_max_messages=settings.dialogue_reply_split_max_messages,
+        reply_split_max_chars=settings.dialogue_reply_split_max_chars,
     )
     if speech_provider is not None:
         speech_registry = SpeechProviderRegistry(speech_provider)

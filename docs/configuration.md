@@ -69,7 +69,7 @@ uv run uvicorn virtual_life.main:app --env-file .env --host 127.0.0.1 --port 800
 | `[automatic_memory]` | 自动记忆开关、批次、最大等待、轮询、输出 token 上限 |
 | `[proactivity]` | 注意力边界与内在活动候选的 poll_seconds，默认 2 秒；开关与限额通过伙伴策略 API 保存 |
 | `[inner_life]` | 心理活动开关、轮询、活动间隔/TTL、证据门槛、主动冲动阈值与可选模型评判 |
-| `[dialogue]` | 前缘抑制式消息防抖 `debounce_seconds`（窗口内后续用户消息被吸收、只回复一次 silent，0=关闭，默认 0） |
+| `[dialogue]` | 前缘抑制式消息防抖 `debounce_seconds`（窗口内后续用户消息被吸收、只回复一次 silent，0=关闭，默认 0）；回复拆条 `reply_split_enabled`/`reply_split_max_messages`/`reply_split_max_chars`（把长回复拆成多条短消息供 IM 逐条发送，默认关闭，3 条 / 120 字） |
 | `[tools]` | 模型工具总开关、单轮最大调用数（1..2）与受信任插件工厂，默认关闭 |
 | `[delegation]` | 外部代理 argv、工作目录、超时、输出上限与环境变量白名单，默认关闭 |
 | `[proactive_schedule]` | `schedule_next_proactive` 的延迟边界与到点静默要求 |
@@ -160,6 +160,9 @@ curl -H "Authorization: Bearer $OWNER_TOKEN" \
 | `inner_life.poll_seconds` | `VIRTUAL_LIFE_INNER_LIFE_POLL_SECONDS` |
 | `inner_life.<其余字段>` | `VIRTUAL_LIFE_INNER_LIFE_<字段大写>` |
 | `dialogue.debounce_seconds` | `VIRTUAL_LIFE_DIALOGUE_DEBOUNCE_SECONDS` |
+| `dialogue.reply_split_enabled` | `VIRTUAL_LIFE_DIALOGUE_REPLY_SPLIT_ENABLED` |
+| `dialogue.reply_split_max_messages` | `VIRTUAL_LIFE_DIALOGUE_REPLY_SPLIT_MAX_MESSAGES` |
+| `dialogue.reply_split_max_chars` | `VIRTUAL_LIFE_DIALOGUE_REPLY_SPLIT_MAX_CHARS` |
 | `tools.<字段>` | `VIRTUAL_LIFE_TOOLS_<字段大写>`；plugins 使用 JSON 数组 |
 | `delegation.<字段>` | `VIRTUAL_LIFE_DELEGATION_<字段大写>`；command/env_allowlist 使用 JSON 数组 |
 | `proactive_schedule.<字段>` | `VIRTUAL_LIFE_PROACTIVE_SCHEDULE_<字段大写>` |

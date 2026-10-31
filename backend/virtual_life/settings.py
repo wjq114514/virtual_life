@@ -78,7 +78,12 @@ _CONFIG_SECTIONS = {
     },
     "proactivity": {"poll_seconds": "proactivity_poll_seconds"},
     "inner_life": {"poll_seconds": "inner_life_poll_seconds"},
-    "dialogue": {"debounce_seconds": "dialogue_debounce_seconds"},
+    "dialogue": {
+        "debounce_seconds": "dialogue_debounce_seconds",
+        "reply_split_enabled": "dialogue_reply_split_enabled",
+        "reply_split_max_messages": "dialogue_reply_split_max_messages",
+        "reply_split_max_chars": "dialogue_reply_split_max_chars",
+    },
     "tools": {
         "enabled": "tools_enabled",
         "max_calls_per_turn": "tools_max_calls_per_turn",
@@ -210,6 +215,8 @@ _INTEGER_FIELDS = (
     "dist_max_bytes",
     "dist_max_packages",
     "webui_session_days",
+    "dialogue_reply_split_max_messages",
+    "dialogue_reply_split_max_chars",
 )
 _NUMBER_FIELDS = (
     "proactivity_poll_seconds",
@@ -225,7 +232,9 @@ _NUMBER_FIELDS = (
     "embedding_query_cache_ttl_seconds",
     "rerank_timeout_seconds",
 )
-_NONNEGATIVE_NUMBER_FIELDS = ("dialogue_debounce_seconds",)
+_NONNEGATIVE_NUMBER_FIELDS = (
+    "dialogue_debounce_seconds",
+)
 _WEIGHT_FIELDS = ("rerank_rrf_weight",)
 
 
@@ -581,6 +590,9 @@ class Settings:
     proactivity_poll_seconds: float = 2.0
     inner_life_poll_seconds: float = 10.0
     dialogue_debounce_seconds: float = 0.0
+    dialogue_reply_split_enabled: bool = False
+    dialogue_reply_split_max_messages: int = 3
+    dialogue_reply_split_max_chars: int = 120
     tools_enabled: bool = False
     tools_max_calls_per_turn: int = 1
     tools_plugins: tuple[str, ...] = ()
@@ -817,6 +829,12 @@ class Settings:
             raise ValueError("Automatic memory enabled must be a boolean")
         if type(self.auto_memory_external) is not bool:
             raise ValueError("Automatic memory external must be a boolean")
+        if type(self.dialogue_reply_split_enabled) is not bool:
+            raise ValueError("Dialogue reply split enabled must be a boolean")
+        if self.dialogue_reply_split_max_messages < 1:
+            raise ValueError("Dialogue reply split max messages must be >= 1")
+        if self.dialogue_reply_split_max_chars < 1:
+            raise ValueError("Dialogue reply split max chars must be >= 1")
         if (
             not _finite_positive(self.auto_memory_external_timeout_seconds)
             or self.auto_memory_external_timeout_seconds > 86400
@@ -970,6 +988,7 @@ class Settings:
                                 "embedding_local",
                                 "rerank_enabled",
                                 "auto_follow_rooms",
+                                "dialogue_reply_split_enabled",
                             )
                             else dict
                         )

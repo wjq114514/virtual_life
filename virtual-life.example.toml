@@ -152,6 +152,12 @@ max_history = 200
 # 前缘抑制式消息防抖：窗口内后续用户消息被吸收、只回复一次（silent），
 # 不消耗模型调用；0 表示关闭。用于合并短时间连续输入。
 debounce_seconds = 0.0
+# 回复拆条（netizen 风格）：把较长的 assistant_message 拆成多条短消息，
+# 由 IM 客户端逐条发送。仅在开启时生效；关闭时 reply_messages 为 None，
+# 客户端回退到整条 assistant_message。max_messages 限制条数，max_chars 限制单条长度。
+reply_split_enabled = false
+reply_split_max_messages = 3
+reply_split_max_chars = 120
 model_assisted = false
 model_min_interval_seconds = 3600
 model_daily_limit = 24
