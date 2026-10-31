@@ -7,5 +7,16 @@
   "capabilities": ["attention.observe", "audio.output", "microphone.input", "text.display", "vision.capture"],
   "context": {"capture": {"source": "android", "state": "live"}},
   "interval_seconds": 15,
-  "timeout_seconds": 10
+  "timeout_seconds": 10,
+  "companion": {
+    "companion_id": "proact-demo",
+    "lease_renew_seconds": 5,
+    "flow_interval_seconds": 5,
+    "follow_to": null,
+    "follow_reason": "manual",
+    "follow_expected_revision": 0,
+    "transfer_to": null,
+    "transfer_reason": "manual",
+    "transfer_expected_revision": 0
+  }
 }
