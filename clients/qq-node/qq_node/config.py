@@ -162,7 +162,7 @@ def load_config(path: Path) -> QQConfig:
         test_user_id=test_user_id,
         interval_seconds=number(data.get("interval_seconds", 30), minimum=1, maximum=3600),
         request_timeout_seconds=number(
-            data.get("request_timeout_seconds", 10), minimum=0.1, maximum=60
+            data.get("request_timeout_seconds", 40), minimum=0.1, maximum=90
         ),
         max_history=int(number(data.get("max_history", 6), minimum=0, maximum=20)),
         max_output_tokens=int(number(data.get("max_output_tokens", 512), minimum=1, maximum=1024)),

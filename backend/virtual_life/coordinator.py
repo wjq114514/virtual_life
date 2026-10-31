@@ -1224,5 +1224,23 @@ class Coordinator:
         return results
 
     def reconcile(self) -> JsonDict:
+        # Read-first guard: only take the write lock when there are prepared
+        # transfers to reconcile. Every reconcile tick was opening a write
+        # transaction even with zero prepared rows (the common case), which
+        # made the 0.5s reconciliation loop a constant SQLite write-lock
+        # contender and amplified any transient lock hold into client-visible
+        # stalls (500 / api_timeout). Keep the same result shape.
+        with self.store.transaction() as connection:
+            has_prepared = connection.execute(
+                "SELECT 1 FROM transfers WHERE status = 'prepared' LIMIT 1"
+            ).fetchone() is not None
+        if not has_prepared:
+            return {
+                "committed": [],
+                "aborted": [],
+                "expired": [],
+                "pending": 0,
+                "server_time": _timestamp(self._now()),
+            }
         with self.store.transaction(write=True) as connection:
             return self._reconcile(connection, self._now())

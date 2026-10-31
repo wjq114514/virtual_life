@@ -246,7 +246,7 @@ def load_config(path: Path) -> MatrixConfig:
             number(data.get("sync_timeout_ms", 30000), minimum=1000, maximum=60000)
         ),
         request_timeout_seconds=number(
-            data.get("request_timeout_seconds", 10), minimum=0.1, maximum=60
+            data.get("request_timeout_seconds", 40), minimum=0.1, maximum=90
         ),
         max_history=int(number(data.get("max_history", 6), minimum=0, maximum=20)),
         max_output_tokens=int(number(data.get("max_output_tokens", 512), minimum=1, maximum=1024)),
