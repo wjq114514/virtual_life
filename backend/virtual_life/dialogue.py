@@ -588,6 +588,10 @@ class DialogueService:
         for channel in ("access_id", "presentation_id"):
             if data.get(channel) is None:
                 data.pop(channel, None)
+        # A client that omits screen_reference produces the same payload as the
+        # pre-screen-reference schema, so the legacy fingerprint stays stable.
+        if data.get("screen_reference") is None:
+            data.pop("screen_reference", None)
         # `internal` is the legacy path; keeping it out of the fingerprint stops an
         # upgrade from invalidating every command id that is still in flight.
         if data.get("generator", "internal") == "internal":

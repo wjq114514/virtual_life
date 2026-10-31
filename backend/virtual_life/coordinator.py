@@ -1231,9 +1231,12 @@ class Coordinator:
         # contender and amplified any transient lock hold into client-visible
         # stalls (500 / api_timeout). Keep the same result shape.
         with self.store.transaction() as connection:
-            has_prepared = connection.execute(
-                "SELECT 1 FROM transfers WHERE status = 'prepared' LIMIT 1"
-            ).fetchone() is not None
+            has_prepared = (
+                connection.execute(
+                    "SELECT 1 FROM transfers WHERE status = 'prepared' LIMIT 1"
+                ).fetchone()
+                is not None
+            )
         if not has_prepared:
             return {
                 "committed": [],
