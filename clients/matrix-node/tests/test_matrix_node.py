@@ -18,7 +18,12 @@ from matrix_node.matrix import (
     extract_text,
     strip_html,
 )
-from matrix_node.runtime import MatrixRuntime
+from matrix_node.runtime import (
+    REPLY_BUBBLE_CHARS,
+    REPLY_MAX_BUBBLES,
+    MatrixRuntime,
+    split_reply,
+)
 
 CONFIG = {
     "server_url": "http://127.0.0.1:8038",
@@ -241,6 +246,7 @@ class FakeApi:
         self.attention_calls = []
         self.dialogue_calls = []
         self.companion = {"revision": 1, "epoch": 0}
+        self.dialogue_result = {"status": "completed", "assistant_message": "收到。"}
 
     def register(self, node_id, label, capabilities):
         self.registered = (node_id, label, capabilities)
@@ -256,7 +262,7 @@ class FakeApi:
 
     def dialogue(self, companion_id, payload):
         self.dialogue_calls.append((companion_id, payload))
-        return {"status": "completed", "assistant_message": "收到。"}
+        return dict(self.dialogue_result)
 
 
 class FakeMatrix:
@@ -556,6 +562,85 @@ class _FakeBridge:
     def send_verification_command(self, action, transaction_id=None):
         self.verification_commands.append((action, transaction_id))
         return {}
+
+
+class SplitReplyTest(unittest.TestCase):
+    def test_short_reply_single_bubble(self):
+        self.assertEqual(split_reply("好的，我记下了。"), ["好的，我记下了。"])
+
+    def test_long_reply_splits_into_multiple_bubbles(self):
+        reply = "嗯，看到了，屏幕最显眼的文字应该是“空闲”，下面还有“文字提交 / 朗读”那一栏…这个界面看着还挺简洁的。"
+        bubbles = split_reply(reply)
+        self.assertGreaterEqual(len(bubbles), 2)
+        self.assertLessEqual(len(bubbles), REPLY_MAX_BUBBLES)
+        for bubble in bubbles:
+            self.assertGreater(len(bubble), 0)
+
+    def test_overflow_merged_into_last_bubble(self):
+        reply = "x" * (REPLY_BUBBLE_CHARS * REPLY_MAX_BUBBLES + 10)
+        bubbles = split_reply(reply)
+        self.assertLessEqual(len(bubbles), REPLY_MAX_BUBBLES)
+
+    def test_empty_returns_empty(self):
+        self.assertEqual(split_reply("   "), [])
+
+
+class ReplyBubblingTest(unittest.TestCase):
+    def setUp(self):
+        path = Path("/tmp/mx_runtime_config.json")
+        path.write_text(json.dumps(CONFIG), encoding="utf-8")
+        self.config = load_config(path)
+        self.api = FakeApi()
+        self.client = FakeMatrix()
+
+    def _make(self):
+        return MatrixRuntime(self.config, self.api, self.client)
+
+    def test_long_reply_queues_paced_bubbles(self):
+        runtime = self._make()
+        self.api.dialogue_result = {
+            "status": "completed",
+            "assistant_message": (
+                "嗯，看到了，屏幕最显眼的文字应该是“空闲”，"
+                "下面还有“文字提交 / 朗读”那一栏…这个界面看着还挺简洁的。"
+            ),
+        }
+        runtime._handle_message(
+            {
+                "room_id": "!room1:matrix.example.org",
+                "sender": "@user:matrix.example.org",
+                "type": "m.room.message",
+                "content": {"msgtype": "m.text", "body": "屏幕上有啥"},
+            }
+        )
+        with runtime._lock:
+            queued = len(runtime._reply_queue)
+        self.assertLessEqual(queued, REPLY_MAX_BUBBLES)
+        # first drain sends ONE paced bubble (fast-path pending is empty for multi)
+        runtime.drain_sends()
+        with runtime._lock:
+            remaining = len(runtime._reply_queue)
+        self.assertLessEqual(remaining, queued)
+
+    def test_short_reply_uses_fast_path(self):
+        runtime = self._make()
+        self.api.dialogue_result = {
+            "status": "completed",
+            "assistant_message": "好的，我记下了。",
+        }
+        runtime._handle_message(
+            {
+                "room_id": "!room1:matrix.example.org",
+                "sender": "@user:matrix.example.org",
+                "type": "m.room.message",
+                "content": {"msgtype": "m.text", "body": "hi"},
+            }
+        )
+        with runtime._lock:
+            self.assertEqual(
+                runtime._pending_send.get("!room1:matrix.example.org"), "好的，我记下了。"
+            )
+            self.assertEqual(runtime._reply_queue, [])
 
 
 if __name__ == "__main__":

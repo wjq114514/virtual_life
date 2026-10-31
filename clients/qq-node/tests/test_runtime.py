@@ -7,7 +7,13 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from qq_node.config import QQConfig
-from qq_node.runtime import MAX_MESSAGE_LENGTH, QQRuntime
+from qq_node.runtime import (
+    MAX_MESSAGE_LENGTH,
+    REPLY_BUBBLE_CHARS,
+    REPLY_MAX_BUBBLES,
+    QQRuntime,
+    split_reply,
+)
 
 
 class StubApi:
@@ -187,6 +193,88 @@ class QQRuntimeTest(unittest.TestCase):
         )
         with self.runtime._lock:
             self.assertEqual(self.runtime._pending_send.get(10001), "稍后见")
+
+
+class SplitReplyTest(unittest.TestCase):
+    def test_short_reply_single_bubble(self):
+        self.assertEqual(split_reply("好的，我记下了。"), ["好的，我记下了。"])
+
+    def test_short_reply_capped_chars_returns_single(self):
+        self.assertEqual(len(split_reply("收到。")), 1)
+
+    def test_long_reply_splits_on_sentence_boundary(self):
+        bubbles = split_reply("在呢。怎么突然问这个，是觉得太安静了，还是想聊点什么？")
+        self.assertEqual(len(bubbles), 1)  # fits within max_chars
+        self.assertLessEqual(len(bubbles[0]), REPLY_BUBBLE_CHARS)
+
+    def test_long_reply_splits_into_multiple_bubbles(self):
+        reply = "嗯，看到了，屏幕最显眼的文字应该是“空闲”，下面还有“文字提交 / 朗读”那一栏…这个界面看着还挺简洁的。"
+        bubbles = split_reply(reply)
+        self.assertGreaterEqual(len(bubbles), 2)
+        self.assertLessEqual(len(bubbles), REPLY_MAX_BUBBLES)
+        for bubble in bubbles:
+            self.assertGreater(len(bubble), 0)
+
+    def test_overflow_merged_into_last_bubble(self):
+        reply = "x" * (REPLY_BUBBLE_CHARS * REPLY_MAX_BUBBLES + 10)
+        bubbles = split_reply(reply)
+        self.assertLessEqual(len(bubbles), REPLY_MAX_BUBBLES)
+
+    def test_empty_returns_empty(self):
+        self.assertEqual(split_reply("   "), [])
+
+
+class ReplyBubblingTest(unittest.TestCase):
+    """A long reply queues multiple short bubbles, paced one per drain cycle."""
+
+    def setUp(self):
+        self.api = StubApi()
+        self.runtime = QQRuntime(config(), self.api)
+
+    def test_long_reply_queues_paced_bubbles(self):
+        self.api.dialogue_result = {
+            "status": "completed",
+            "assistant_message": (
+                "嗯，看到了，屏幕最显眼的文字应该是“空闲”，"
+                "下面还有“文字提交 / 朗读”那一栏…这个界面看着还挺简洁的。"
+            ),
+        }
+        self.runtime.handle_event(
+            {
+                "post_type": "message",
+                "message_type": "private",
+                "user_id": 10001,
+                "message": [{"type": "text", "data": {"text": "屏幕上有啥"}}],
+            }
+        )
+        with self.runtime._lock:
+            # multi-bubble reply goes to the paced queue, not the fast path
+            self.assertNotIn(10001, self.runtime._pending_send)
+            queued = len(self.runtime._reply_queue)
+        self.assertGreaterEqual(queued, 2)
+        self.assertLessEqual(queued, REPLY_MAX_BUBBLES)
+        # first drain sends ONE paced bubble and leaves the rest queued.
+        self.runtime.drain_sends()
+        with self.runtime._lock:
+            remaining = len(self.runtime._reply_queue)
+        self.assertEqual(remaining, queued - 1)
+
+    def test_short_reply_uses_fast_path(self):
+        self.api.dialogue_result = {
+            "status": "completed",
+            "assistant_message": "好的，我记下了。",
+        }
+        self.runtime.handle_event(
+            {
+                "post_type": "message",
+                "message_type": "private",
+                "user_id": 10001,
+                "message": [{"type": "text", "data": {"text": "hi"}}],
+            }
+        )
+        with self.runtime._lock:
+            self.assertEqual(self.runtime._pending_send.get(10001), "好的，我记下了。")
+            self.assertEqual(self.runtime._reply_queue, [])
 
 
 if __name__ == "__main__":

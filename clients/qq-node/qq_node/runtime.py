@@ -7,6 +7,7 @@ NapCat's HTTP action server.
 """
 
 import logging
+import re
 import threading
 import time
 import uuid
@@ -21,6 +22,50 @@ LOGGER = logging.getLogger(__name__)
 
 CAPABILITIES = ["text.display", "attention.observe", "qq.message"]
 MAX_MESSAGE_LENGTH = 4096
+REPLY_BUBBLE_CHARS = 40
+REPLY_MAX_BUBBLES = 3
+
+_SENTENCE_SPLIT = re.compile(r"(?<=[。！？!?；;])\s*|\n+")
+_CLAUSE_SPLIT = re.compile(r"(?<=[，,、])")
+
+
+def split_reply(
+    text: str, *, max_messages: int = REPLY_MAX_BUBBLES, max_chars: int = REPLY_BUBBLE_CHARS
+) -> list[str]:
+    """Break a long reply into short, netizen-style bubbles.
+
+    Prefers sentence boundaries, then clause boundaries; greedily packs clauses
+    up to ``max_chars``, caps the count at ``max_messages`` (overflow merged into
+    the last bubble). A reply that already fits returns a single bubble.
+    """
+    text = text.strip()
+    if not text:
+        return []
+    if len(text) <= max_chars:
+        return [text]
+    sentences = [piece for piece in _SENTENCE_SPLIT.split(text) if piece.strip()]
+    clauses: list[str] = []
+    for sentence in sentences:
+        if len(sentence) <= max_chars:
+            clauses.append(sentence)
+        else:
+            clauses.extend(piece for piece in _CLAUSE_SPLIT.split(sentence) if piece.strip())
+    bubbles: list[str] = []
+    current = ""
+    for clause in clauses:
+        if current and len(current) + len(clause) > max_chars:
+            bubbles.append(current)
+            current = clause
+        else:
+            current += clause
+        while len(current) > max_chars:
+            bubbles.append(current[:max_chars])
+            current = current[max_chars:]
+    if current:
+        bubbles.append(current)
+    if len(bubbles) > max_messages:
+        bubbles = bubbles[: max_messages - 1] + ["".join(bubbles[max_messages - 1 :])]
+    return bubbles
 
 
 def utc_timestamp(value: datetime | None = None) -> str:
@@ -41,6 +86,7 @@ class QQRuntime:
         self._registered = False
         self._last_typing_at: dict[int, float] = {}
         self._pending_send: dict[int, str] = {}
+        self._reply_queue: list[tuple[int, str]] = []
         self._lock = threading.Lock()
         self._server: OneBotServer | None = None
         self._actions: NapCatActionClient | None = None
@@ -162,7 +208,7 @@ class QQRuntime:
             return
         status = result.get("status")
         if status in ("completed", "silent") and result.get("assistant_message"):
-            self._send_private(user_id, result["assistant_message"])
+            self._send_reply(user_id, result["assistant_message"])
 
     def _handle_notice(self, event: dict[str, Any]) -> None:
         notice_type = event.get("notice_type")
@@ -190,10 +236,22 @@ class QQRuntime:
         with self._lock:
             self._pending_send[user_id] = text[:MAX_MESSAGE_LENGTH]
 
+    def _send_reply(self, user_id: int, text: str) -> None:
+        """Queue a reply as one or more short, netizen-style bubbles."""
+        if not text:
+            return
+        bubbles = split_reply(text)
+        with self._lock:
+            if len(bubbles) == 1:
+                self._pending_send[user_id] = bubbles[0][:MAX_MESSAGE_LENGTH]
+            else:
+                self._reply_queue.extend((user_id, bubble) for bubble in bubbles)
+
     def drain_sends(self) -> None:
         with self._lock:
             pending = dict(self._pending_send)
             self._pending_send.clear()
+            paced = self._reply_queue.pop(0) if self._reply_queue else None
         if self._actions is None:
             return
         for user_id, text in pending.items():
@@ -202,6 +260,16 @@ class QQRuntime:
             except HttpActionError as exc:
                 LOGGER.warning("send_failed user_id=%s reason=%s", user_id, exc.code)
                 continue
+            status = result.get("status")
+            if status not in (None, "ok", "async"):
+                LOGGER.warning("send_failed user_id=%s status=%s", user_id, status)
+        if paced is not None:
+            user_id, text = paced
+            try:
+                result = self._actions.send_private(user_id, text)
+            except HttpActionError as exc:
+                LOGGER.warning("send_failed user_id=%s reason=%s", user_id, exc.code)
+                return
             status = result.get("status")
             if status not in (None, "ok", "async"):
                 LOGGER.warning("send_failed user_id=%s status=%s", user_id, status)
@@ -232,7 +300,10 @@ class QQRuntime:
                 last_heartbeat = time.monotonic()
                 while not stop.is_set():
                     self.drain_sends()
-                    if self._config.maintain_node and time.monotonic() - last_heartbeat >= self._config.interval_seconds:
+                    if (
+                        self._config.maintain_node
+                        and time.monotonic() - last_heartbeat >= self._config.interval_seconds
+                    ):
                         try:
                             self.heartbeat()
                         except TransportError as exc:
