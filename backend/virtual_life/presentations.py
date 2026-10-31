@@ -166,10 +166,19 @@ class PresentationService:
                 "SELECT COALESCE(MAX(sequence), 0) FROM events"
             ).fetchone()[0]
             expires_at = _timestamp(now + timedelta(seconds=self.ttl_seconds))
+            # Re-opening the same presentation_id (e.g. an app restart) must not
+            # violate the UNIQUE(presentation_id) constraint: re-activate the row.
             connection.execute(
                 """INSERT INTO native_presentations
                 (presentation_id,node_id,kind,opened_sequence,created_at,last_seen_at,expires_at,released)
-                VALUES (?, ?, ?, ?, ?, ?, ?, 0)""",
+                VALUES (?, ?, ?, ?, ?, ?, ?, 0)
+                ON CONFLICT(presentation_id) DO UPDATE SET
+                    node_id=excluded.node_id,
+                    kind=excluded.kind,
+                    opened_sequence=excluded.opened_sequence,
+                    last_seen_at=excluded.last_seen_at,
+                    expires_at=excluded.expires_at,
+                    released=0""",
                 (
                     data["presentation_id"],
                     node_id,

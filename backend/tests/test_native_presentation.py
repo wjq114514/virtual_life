@@ -118,6 +118,17 @@ def test_new_presentation_supersedes_the_previous_generation(runtime):
     assert client.post("/v1/nodes/desk/presentations/p2/heartbeat").status_code == 200
 
 
+def test_reopening_the_same_presentation_id_reactivates(runtime):
+    client = runtime[0]
+    # First open creates the row; releasing soft-releases it (released=1).
+    assert open_pres(client, "p1").status_code == 201
+    assert client.delete("/v1/nodes/desk/presentations/p1").status_code == 200
+    # Re-opening the SAME presentation_id must not hit the UNIQUE(presentation_id)
+    # constraint — it re-activates the row instead (the app-restart case).
+    assert open_pres(client, "p1").status_code == 201
+    assert client.post("/v1/nodes/desk/presentations/p1/heartbeat").status_code == 200
+
+
 def test_expired_presentation_cannot_revive(runtime):
     client, _, clock, _, _ = runtime
     assert open_pres(client, "p1").status_code == 201
