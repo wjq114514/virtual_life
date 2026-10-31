@@ -288,7 +288,8 @@ class ServerScreenController(
                         "attention.observe",
                         "text.display",
                         "audio.output",
-                        "microphone.input",
+                        "audio.input",
+                        "speech.recognize.local",
                     ),
                 ),
             )

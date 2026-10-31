@@ -16,8 +16,9 @@ android {
         versionCode = 1
         versionName = "0.1.0"
         ndk {
-            // First version targets arm64 devices; add x86_64 explicitly for emulators.
+            // arm64 for physical devices, x86_64 for emulators (sherpa AAR ships both).
             abiFilters += "arm64-v8a"
+            abiFilters += "x86_64"
         }
     }
 

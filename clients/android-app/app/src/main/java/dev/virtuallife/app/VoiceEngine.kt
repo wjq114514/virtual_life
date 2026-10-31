@@ -98,7 +98,7 @@ class VoiceEngine(
 
     private val bridge = object : AndroidNodeBridge {
         override suspend fun capabilities(): Set<String> =
-            setOf("text.display", "audio.output", "microphone.input")
+            setOf("text.display", "audio.output", "audio.input", "speech.recognize.local")
 
         override suspend fun permissions(): HostPermissions = HostPermissions(
             microphoneGranted = true,
@@ -269,6 +269,19 @@ class VoiceEngine(
         companion = api.getCompanion(config.companionId)
     }
 
+    /**
+     * Re-establish the voice session after it expired server-side (e.g. a heartbeat
+     * POST stalled past `expires_at` during a server write-lock stall). Re-opens the
+     * presentation (idempotent server-side now) and creates a fresh session. Keeps
+     * [session] non-null on success so the heartbeat loop can continue listening.
+     */
+    private suspend fun recoverSession() {
+        runCatching {
+            api.openPresentation(config.nodeId, PresentationOpen(presentationId = presentationId))
+        }
+        createSession()
+    }
+
     private fun startHeartbeat() {
         heartbeatJob = scope.launch {
             while (isActive) {
@@ -281,6 +294,19 @@ class VoiceEngine(
                         VoiceHeartbeat(UUID.randomUUID().toString()),
                     )
                 } catch (error: Throwable) {
+                    if (error is ApiException && error.statusCode == 410) {
+                        // Session expired server-side (e.g. a heartbeat stalled past
+                        // expires_at during a write-lock stall). Recreate it and keep
+                        // listening instead of polling a dead session forever.
+                        status.value = "会话已失效，正在恢复…"
+                        val recovered = runCatching { recoverSession() }.isSuccess
+                        if (!recovered) {
+                            status.value = "会话恢复失败: ${error.message}"
+                            break
+                        }
+                        status.value = "正在听"
+                        continue
+                    }
                     null
                 }
                 if (updated != null) {
