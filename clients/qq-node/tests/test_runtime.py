@@ -20,6 +20,7 @@ class StubApi:
         self.companion_state = {"revision": 3, "epoch": 7}
         self.dialogue_calls = []
         self.dialogue_result = {"status": "silent"}
+        self.follow_calls = []
 
     def register(self, node_id, label, capabilities):
         self.registered = (node_id, label, list(capabilities))
@@ -32,6 +33,10 @@ class StubApi:
 
     def get_companion(self, companion_id):
         return dict(self.companion_state)
+
+    def follow_room(self, companion_id, payload):
+        self.follow_calls.append((companion_id, payload))
+        return {"ok": True}
 
     def dialogue(self, companion_id, payload):
         self.dialogue_calls.append((companion_id, payload))

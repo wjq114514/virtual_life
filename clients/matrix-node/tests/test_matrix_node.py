@@ -240,6 +240,7 @@ class FakeApi:
         self.heartbeats = 0
         self.attention_calls = []
         self.dialogue_calls = []
+        self.follow_calls = []
         self.companion = {"revision": 1, "epoch": 0}
 
     def register(self, node_id, label, capabilities):
@@ -252,7 +253,14 @@ class FakeApi:
         self.attention_calls.append(payload)
 
     def get_companion(self, companion_id):
-        return self.companion
+        return dict(self.companion)
+
+    def follow_room(self, companion_id, payload):
+        self.follow_calls.append((companion_id, payload))
+        # Simulate the server bumping revision/epoch on a successful follow.
+        self.companion["revision"] += 1
+        self.companion["epoch"] += 1
+        return {"ok": True}
 
     def dialogue(self, companion_id, payload):
         self.dialogue_calls.append((companion_id, payload))

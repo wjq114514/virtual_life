@@ -140,6 +140,28 @@ class MatrixRuntime:
         except TransportError as exc:
             LOGGER.warning("companion_unavailable reason=%s", exc.code)
             return
+        # The companion may still be owned by another node (e.g. the Android
+        # app claimed it). Room activity on this Matrix node is authoritative
+        # for where the lifeform currently is, so best-effort follow first.
+        # follow_room is idempotent when already in this node.
+        try:
+            self._api.follow_room(
+                companion,
+                {
+                    "command_id": "matrix-follow-" + str(uuid.uuid4()),
+                    "target_node_id": self._config.node_id,
+                    "expected_revision": state.get("revision", 0),
+                    "reason": "room_activity",
+                },
+            )
+        except TransportError as exc:
+            LOGGER.info("follow_skipped reason=%s", exc.code)
+        # Re-read state after the (possible) follow so revision/epoch are fresh.
+        try:
+            state = self._api.get_companion(companion)
+        except TransportError as exc:
+            LOGGER.warning("companion_unavailable reason=%s", exc.code)
+            return
         revision = state.get("revision", 0)
         epoch = state.get("epoch", 0)
         payload: dict[str, Any] = {
