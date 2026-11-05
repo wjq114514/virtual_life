@@ -811,6 +811,15 @@ class PersonalityPromptBuilder:
             snapshot = rhythm_snapshot(datetime.now(timezone.utc), self.rhythm_timezone)
             if snapshot is not None:
                 rhythm_aside = snapshot["label"]
+                # Deep night and a user message: she was asleep and is being
+                # woken by this very turn — reply may carry sleepiness and
+                # stay shorter.
+                if request.user_initiated and snapshot["is_deep_night"]:
+                    rhythm_aside = (
+                        f"{rhythm_aside}\n"
+                        "你原本是睡着的，是被这条消息叫醒的：回复可以带一点睡意、"
+                        "比平时短一些，不必立刻精神饱满。"
+                    )
         asides = [
             _attention_drift(
                 companion.interaction_mode,

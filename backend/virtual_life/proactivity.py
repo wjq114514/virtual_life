@@ -1199,6 +1199,10 @@ class ProactivityService:
         policy = self._policy(connection, companion["companion_id"])
         if not policy["policy"]["enabled"]:
             return False
+        # An asleep companion does not start conversations on her own; she can
+        # still be woken by a user-initiated dialogue turn.
+        if self.inner_life.sleep_phase(now=now) == "asleep":
+            return False
         if activity["urge"] < self.inner_life.policy.proactive_urge_threshold:
             return False
         if self.dialogue.provider is None or not self.dialogue.model_name:

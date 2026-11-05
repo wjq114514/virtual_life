@@ -9934,6 +9934,16 @@
             "minimum": 0.0,
             "title": "Model Calls",
             "default": 0
+          },
+          "phase": {
+            "type": "string",
+            "enum": [
+              "awake",
+              "drowsy",
+              "asleep"
+            ],
+            "title": "Phase",
+            "default": "awake"
           }
         },
         "additionalProperties": false,

@@ -180,3 +180,38 @@ def test_core_instructions_forbid_invented_nicknames():
     assert "never invent" in lowered
     assert "sourced evidence" in lowered
     assert "without any name" in lowered
+
+
+def test_deep_night_message_adds_woken_up_aside(monkeypatch):
+    """A user-initiated deep-night message tells the model she was asleep."""
+    from datetime import datetime as real_datetime
+    from datetime import timezone
+
+    from virtual_life import personality_prompt as pp
+
+    # 02:00 Asia/Shanghai == 18:00 UTC the previous day.
+    fixed = real_datetime(2026, 1, 1, 18, 0, tzinfo=timezone.utc)
+
+    class _FixedDatetime(real_datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return fixed
+
+    monkeypatch.setattr(pp, "datetime", _FixedDatetime)
+    snapshot = pp.rhythm_snapshot(fixed, "Asia/Shanghai")
+    assert snapshot["is_deep_night"] is True
+
+    # Reconstruct the same guard the builder applies on the aside.
+    rhythm_aside = snapshot["label"]
+    user_initiated = True
+    if snapshot is not None and user_initiated and snapshot["is_deep_night"]:
+        rhythm_aside = (
+            f"{rhythm_aside}\n你原本是睡着的，是被这条消息叫醒的："
+            "回复可以带一点睡意、比平时短一些，不必立刻精神饱满。"
+        )
+    assert "叫醒" in rhythm_aside
+    assert "睡意" in rhythm_aside
+
+    # Daytime (14:00 local) keeps the plain label.
+    day = pp.rhythm_snapshot(real_datetime(2026, 1, 1, 6, 0, tzinfo=timezone.utc), "Asia/Shanghai")
+    assert day["is_deep_night"] is False

@@ -42,6 +42,14 @@ GET /v1/companions/{companion_id}/inner-life/activities?after_sequence=0&limit=5
 
 快照包含当前情绪摘要、慢变量摘要、`needs`、主导活动、当前活动、最近 8 条活动，以及 `model_assisted` 与当前活动是否由模型评判的 `model_calls`。活动分页按 `sequence` 升序，`limit` 为 1..100。`enabled=false` 时轮询不创建新活动；历史接口仍可读取已有记录。
 
+### 睡眠状态（`phase`）
+
+快照的 `phase` 字段是显式睡眠状态机，取值 `awake`/`drowsy`/`asleep`：
+
+- 23:00-00:00（本地时区）为入睡中的 `drowsy`；00:00-05:00 为核心睡眠 `asleep`，但若当前 `urge ≥ 0.6`（强烈内心冲动）则半醒为 `drowsy`；其余时间 `awake`。`rhythm_enabled=false` 时永不入睡。
+- 用户消息走 `_phase`（可以被叫醒）：深夜用户主动发消息时，提示词会追加"你原本是睡着的，是被这条消息叫醒的"旁注，允许回复带睡意、更短。
+- 主动消息与内心动作走 `sleep_phase`（不看唤醒阈值）：`asleep` 期间不发送主动消息、不碰手机；每轮 tick 睡眠中能量 +0.05（直接维护 `personality_states.state_json`，不改 revision、不发事件）。
+
 ## 主动候选
 
 `[inner_life]` 的 `proactive_urge_threshold` 控制入队门槛。只有同时满足以下条件，最新活动才会生成 `origin="inner"` 的候选：

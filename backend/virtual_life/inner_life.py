@@ -79,6 +79,13 @@ _SALIENCE_HALF_LIFE_SECONDS = 7200.0
 # below rather than exp(-elapsed/half-life) (~1e-6 after a full night).
 _SLEEP_SPAN_SECONDS = 6 * 3600.0
 _MORNING_WAKE_FACTOR = 0.55
+# Explicit sleep phase: deep night means asleep unless an inner urge is strong
+# enough to have woken the companion up (_SLEEP_WAKE_URGE); the small hours
+# are light, drowsy sleep. Sleep restores energy slowly (_SLEEP_ENERGY_GAIN
+# per tick while the phase is asleep).
+_SLEEP_WAKE_URGE = 0.6
+_SLEEP_ENERGY_GAIN = 0.05
+_SLEEP_PHASES = ("awake", "drowsy", "asleep")
 # Hourly bucket width for activity_id derivation (dedup granularity).
 _BUCKET_SECONDS = 3600
 _NEUTRAL = 0.5
@@ -223,6 +230,7 @@ class InnerLifeSnapshot(RequestModel):
     current: InnerActivity | None = None
     activities: list[InnerActivity] = Field(default_factory=list, max_length=8)
     model_calls: int = Field(default=0, ge=0, le=1)
+    phase: Literal[_SLEEP_PHASES] = "awake"
 
 
 class InnerActivityPage(RequestModel):
@@ -602,6 +610,73 @@ class InnerLifeService:
             "idle_seconds": idle,
         }
 
+    def _phase(self, state, now):
+        """Effective sleep phase for a companion snapshot.
+
+        Deep night (23:00-05:00 local) means asleep, unless a strong inner
+        urge (>= _SLEEP_WAKE_URGE) woke her — then drowsy. Predawn is light
+        sleep (drowsy); everything else is awake. Disabled rhythm means the
+        companion never sleeps.
+        """
+        rhythm = (
+            rhythm_snapshot(now, self.policy.rhythm_timezone)
+            if self.policy.rhythm_enabled
+            else None
+        )
+        if rhythm is None:
+            return "awake"
+        if rhythm["is_deep_night"]:
+            if rhythm["is_predawn"]:
+                # 00:00-05:00 core sleep: a strong urge can half-wake her.
+                return "drowsy" if state["urge"] >= _SLEEP_WAKE_URGE else "asleep"
+            # 23:00-00:00 falling asleep.
+            return "drowsy"
+        return "awake"
+
+    def sleep_phase(self, companion_id=None, now=None):
+        """Rhythm-only phase used to gate actions and proactive output.
+
+        Deliberately ignores the wake threshold: while the companion sleeps
+        she does not touch the phone or start conversations. A dialogue turn
+        from the user goes through ``_phase`` (she can be woken by a message).
+        """
+        if not self.policy.rhythm_enabled:
+            return "awake"
+        rhythm = rhythm_snapshot(now or self.personality._now(), self.policy.rhythm_timezone)
+        if rhythm is None:
+            return "awake"
+        if rhythm["is_deep_night"] and rhythm["is_predawn"]:
+            return "asleep"
+        if rhythm["is_deep_night"]:
+            return "drowsy"
+        return "awake"
+
+    def _rest_energy(self, connection, companion_id, now):
+        """Sleep restores energy directly in personality_states.
+
+        Bumps neither revision nor events: the revision contract belongs to
+        the external update_state API; this is internal maintenance while the
+        companion is asleep.
+        """
+        row = connection.execute(
+            "SELECT state_json, expires_at FROM personality_states WHERE companion_id=?",
+            (companion_id,),
+        ).fetchone()
+        if row is None or row["expires_at"] is None:
+            return False
+        if row["expires_at"] < _timestamp(now):
+            return False  # an expired state row is not maintained here
+        data = json.loads(row["state_json"])
+        energy = float(data.get("energy", 0.8))
+        if energy >= 1.0:
+            return False
+        data["energy"] = min(1.0, energy + _SLEEP_ENERGY_GAIN)
+        connection.execute(
+            "UPDATE personality_states SET state_json=?, updated_at=? WHERE companion_id=?",
+            (json.dumps(data, ensure_ascii=False), _timestamp(now), companion_id),
+        )
+        return True
+
     def snapshot(self, connection, companion_id, now):
         context = self._context(connection, companion_id, now)
         state = self._state(context)
@@ -619,6 +694,7 @@ class InnerLifeService:
         effective = context["emotion"]["effective_state"]
         return InnerLifeSnapshot(
             companion_id=companion_id,
+            phase=self._phase(state, now),
             enabled=self.policy.enabled,
             computed_at=_timestamp(now),
             context_version=context["version"],
@@ -733,6 +809,10 @@ class InnerLifeService:
                 job = self._prepare(connection, row["companion_id"], now)
                 if job is not None:
                     jobs.append(job)
+                # While asleep the companion does not generate inner
+                # activities; each tick quietly restores energy instead.
+                if self.sleep_phase(now=now) == "asleep":
+                    self._rest_energy(connection, row["companion_id"], now)
         created = 0
         for job in jobs:
             judgment = self._judge(job, now)
@@ -1272,6 +1352,9 @@ class InnerLifeService:
         if not self.policy.action_enabled:
             return None
         if not self.policy.action_adb_serial:
+            return None
+        # An asleep companion does not reach for the phone.
+        if self.sleep_phase(now=now) == "asleep":
             return None
         try:
             with self.store.transaction() as connection:

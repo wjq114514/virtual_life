@@ -98,6 +98,7 @@ data class InnerLifeSnapshot(
     val activities: List<InnerActivity> = emptyList(),
     @SerialName("model_assisted") val modelAssisted: Boolean = false,
     @SerialName("model_calls") val modelCalls: Int = 0,
+    val phase: String = "awake",
 )
 
 @Serializable

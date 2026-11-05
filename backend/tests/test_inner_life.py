@@ -7,6 +7,7 @@ import pytest
 from fastapi.testclient import TestClient
 from test_api import attach_desktop
 from test_memory_dialogue import Clock
+from virtual_life import inner_life as inner_life_module
 from virtual_life.api import create_app
 from virtual_life.inner_life import InnerLifePolicy
 from virtual_life.memory import MemoryPolicy
@@ -584,3 +585,82 @@ def test_long_gap_at_deep_night_still_decays(runtime):
     clock.value += timedelta(hours=16)
     data = client.get("/v1/companions/sui/inner-life").json()
     assert data["salience"] < 0.05
+
+
+# ------------------------------------------------------- sleep state ----
+
+
+def test_inner_life_snapshot_reports_sleep_phase(runtime):
+    client, app, clock, provider, state = runtime
+    # 08:00 local morning.
+    assert client.get("/v1/companions/sui/inner-life").json()["phase"] == "awake"
+    # 23:30 local: falling asleep.
+    clock.value += timedelta(hours=15, minutes=30)
+    assert client.get("/v1/companions/sui/inner-life").json()["phase"] == "drowsy"
+    # 01:00 local: core sleep (no strong urge pending).
+    clock.value += timedelta(hours=1, minutes=30)
+    assert client.get("/v1/companions/sui/inner-life").json()["phase"] == "asleep"
+
+
+def test_sleep_restores_energy_without_revising_state(runtime):
+    client, app, clock, provider, state = runtime
+    update = client.post(
+        "/v1/companions/sui/personality/state",
+        json={
+            "command_id": "sleep-state",
+            "expected_revision": 0,
+            "state": {"mood": "tired", "energy": 0.2, "social_battery": 0.3},
+            "ttl_seconds": 86400,
+        },
+    )
+    assert update.status_code == 200, update.text
+    clock.value += timedelta(hours=17)  # 01:00 local, asleep
+    assert app.state.inner_life.tick() in (0, 1)
+    snapshot = client.get("/v1/companions/sui/personality/state").json()
+    assert snapshot["state"]["energy"] >= 0.25
+    # Maintenance did not bump the revision or mint a new state event.
+    assert snapshot["revision"] == 1
+    assert app.state.inner_life.tick() in (0, 1)
+    after = client.get("/v1/companions/sui/personality/state").json()
+    assert after["state"]["energy"] > snapshot["state"]["energy"]
+
+
+def test_asleep_companion_does_not_send_proactive_output(runtime, monkeypatch):
+    client, app, clock, provider, state = runtime
+    send(client, state, "one", "谢谢你陪我读书")
+    provider.requests.clear()
+    clock.value += timedelta(minutes=20)
+    observe(client, clock)
+    enable_proactivity(client)
+    assert app.state.inner_life.tick() == 1
+    monkeypatch.setattr(app.state.inner_life, "sleep_phase", lambda *a, **k: "asleep")
+    assert app.state.proactivity.process_next() is None
+    assert provider.requests == []
+    assert client.get("/v1/companions/sui/proactivity/decisions").json()["decisions"] == []
+
+
+def test_asleep_companion_does_not_touch_the_phone(runtime, monkeypatch):
+    client, app, clock, provider, state = runtime
+    service = app.state.inner_life
+    service.policy.action_enabled = True
+    service.policy.action_adb_serial = "emu"
+    monkeypatch.setattr(
+        service,
+        "_action_gates",
+        lambda *a, **k: {"activity_id": "ina_x", "kind": "curious", "salience": 0.9},
+    )
+    calls = []
+    monkeypatch.setattr(inner_life_module, "_adb_device_online", lambda serial: True)
+    monkeypatch.setattr(
+        service,
+        "_execute_action",
+        lambda *a, **k: calls.append(a) or {"action": "look", "ok": True},
+    )
+    monkeypatch.setattr(service, "_remember_action", lambda *a, **k: None)
+    # Awake at 08:00 local: the phone is reachable.
+    assert service._maybe_action("sui", clock.value) is not None
+    assert calls
+    # 01:00 local: asleep — no phone.
+    clock.value += timedelta(hours=17)
+    assert service._maybe_action("sui", clock.value) is None
+    assert len(calls) == 1

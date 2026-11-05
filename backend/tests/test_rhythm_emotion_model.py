@@ -290,3 +290,44 @@ def test_appraise_model_name_override_reaches_service(tmp_path):
 
     assert build("") == "slow-model"
     assert build("fast-model") == "fast-model"
+
+
+# ------------------------------------------------------- sleep phase ----
+
+
+def test_sleep_phase_predawn_and_falling_asleep_and_day():
+    service = _inner_service(True)
+    # 02:00 local (UTC 18:00) -> core sleep.
+    assert service.sleep_phase(now=datetime(2026, 1, 1, 18, 0, tzinfo=timezone.utc)) == "asleep"
+    # 23:30 local (UTC 15:30) -> falling asleep.
+    assert service.sleep_phase(now=datetime(2025, 12, 31, 15, 30, tzinfo=timezone.utc)) == "drowsy"
+    # 14:00 local -> awake.
+    assert service.sleep_phase(now=datetime(2026, 1, 1, 6, 0, tzinfo=timezone.utc)) == "awake"
+
+
+def test_sleep_phase_ignores_wake_threshold():
+    # The gate phase never reads urge: she does not wake herself up.
+    service = _inner_service(True)
+    now = datetime(2026, 1, 1, 18, 0, tzinfo=timezone.utc)  # 02:00 local
+    assert service.sleep_phase(now=now) == "asleep"
+
+
+def test_effective_phase_can_be_woken_by_strong_urge():
+    service = _inner_service(True)
+    now = datetime(2026, 1, 1, 18, 0, tzinfo=timezone.utc)  # 02:00 local
+    assert service._phase({"urge": 0.3}, now) == "asleep"
+    assert service._phase({"urge": 0.7}, now) == "drowsy"
+    # 23:30 local is drowsy regardless of urge.
+    evening = datetime(2025, 12, 31, 15, 30, tzinfo=timezone.utc)
+    assert service._phase({"urge": 0.9}, evening) == "drowsy"
+    # Daytime is awake.
+    day = datetime(2026, 1, 1, 6, 0, tzinfo=timezone.utc)
+    assert service._phase({"urge": 0.1}, day) == "awake"
+
+
+def test_sleep_phase_rhythm_disabled_never_sleeps():
+    service = _inner_service(False)
+    assert service.sleep_phase(now=datetime(2026, 1, 1, 18, 0, tzinfo=timezone.utc)) == "awake"
+    assert (
+        service._phase({"urge": 0.1}, datetime(2026, 1, 1, 18, 0, tzinfo=timezone.utc)) == "awake"
+    )
