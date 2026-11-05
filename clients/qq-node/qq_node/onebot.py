@@ -363,3 +363,6 @@ class NapCatActionClient:
 
     def send_private(self, user_id: int, text: str) -> dict[str, Any]:
         return self._call("send_private_msg", {"user_id": user_id, "message": text})
+
+    def send_group(self, group_id: int, text: str) -> dict[str, Any]:
+        return self._call("send_group_msg", {"group_id": group_id, "message": text})

@@ -6,6 +6,7 @@ attention samples, and sends companion replies back to Matrix rooms.
 """
 
 import logging
+import random
 import threading
 import time
 import uuid
@@ -53,6 +54,11 @@ class MatrixRuntime:
         # drain_sends() cycle instead.
         self._send_queue: deque[tuple[str, str]] = deque()
         self._lock = threading.Lock()
+        self._next_send_at = 0.0
+        # Injectable for tests: fake clock / fake sleep keep pacing and
+        # backoff assertions deterministic without real delays.
+        self._monotonic = time.monotonic
+        self._sleep = time.sleep
         self._verification: dict[str, Any] | None = None
         if self._e2ee is not None:
             self._e2ee.on_message(self._on_sidecar_message)
@@ -191,8 +197,10 @@ class MatrixRuntime:
             # The server may split a long reply into short netizen-style bubbles
             # (reply_messages). Send each bubble as its own message; fall back to
             # the single canonical assistant_message when no split is present.
+            # max_messages_per_reply is a second cap aligned with the server's
+            # reply_split_max_messages.
             bubbles = result.get("reply_messages") or [result["assistant_message"]]
-            for bubble in bubbles:
+            for bubble in bubbles[: self._config.max_messages_per_reply]:
                 self._send_text(room_id, bubble)
 
     def _handle_room_message(self, event: dict[str, Any]) -> None:
@@ -271,21 +279,80 @@ class MatrixRuntime:
         with self._lock:
             self._send_queue.append((room_id, text[:MAX_MESSAGE_LENGTH]))
 
-    def drain_sends(self) -> None:
-        if not self._send_queue:
-            return
-        with self._lock:
-            if not self._send_queue:
-                return
-            room_id, text = self._send_queue.popleft()
+    def _interval_seconds(self) -> float:
+        return self._config.send_interval_min_seconds + random.uniform(
+            0, self._config.send_interval_jitter_seconds
+        )
+
+    def _typing_duration_seconds(self, text: str) -> float:
+        """Estimated typing time for a bubble: length-proportional with a floor."""
+        proportional = len(text) / max(self._config.typing_chars_per_second, 0.5)
+        return max(self._config.typing_min_seconds, proportional)
+
+    def _set_typing(self, room_id: str, text: str) -> None:
+        timeout_ms = int(self._typing_duration_seconds(text) * 1000)
+        try:
+            self._client.set_typing(room_id, self._config.user_id, timeout_ms)
+        except (MatrixError, OSError) as exc:
+            # Typing is a hint, never a gate: log and continue.
+            LOGGER.info("typing_failed room_id=%s reason=%s", room_id, exc)
+
+    def _deliver_once(self, room_id: str, text: str) -> bool:
         try:
             if self._e2ee is not None:
                 self._e2ee.send_command({"cmd": "send", "room_id": room_id, "body": text})
             else:
                 self._client.send_text(room_id, text)
+            return True
         except (MatrixError, OSError) as exc:
             LOGGER.warning("send_failed room_id=%s reason=%s", room_id, exc)
+            return False
+
+    def _deliver_with_retry(self, room_id: str, text: str) -> bool:
+        attempt = 0
+        while True:
+            if self._deliver_once(room_id, text):
+                return True
+            if attempt >= self._config.send_max_retries:
+                return False
+            delay = self._config.retry_backoff_initial_seconds * (2**attempt)
+            LOGGER.warning(
+                "send_retry room_id=%s attempt=%d delay=%.1fs", room_id, attempt + 1, delay
+            )
+            self._sleep(delay)
+            attempt += 1
+
+    def drain_sends(self) -> None:
+        """Send at most one queued bubble per call, paced by interval + jitter.
+
+        Before each send the typing notifier is set for a length-proportional
+        duration (when typing_before_send is on). Failures retry with
+        exponential backoff up to send_max_retries; when retries are exhausted
+        and merge_on_limit is set, the remaining bubbles for the same room are
+        merged into one message and sent as a final attempt.
+        """
+        if self._monotonic() < self._next_send_at:
             return
+        with self._lock:
+            if not self._send_queue:
+                return
+            room_id, text = self._send_queue.popleft()
+        if self._config.typing_before_send:
+            self._set_typing(room_id, text)
+        if self._deliver_with_retry(room_id, text):
+            self._next_send_at = self._monotonic() + self._interval_seconds()
+            return
+        if not self._config.merge_on_limit:
+            return
+        with self._lock:
+            remaining = [item for item in self._send_queue if item[0] == room_id]
+            self._send_queue = deque(item for item in self._send_queue if item[0] != room_id)
+        merged = "\n".join([text] + [item[1] for item in remaining])[:MAX_MESSAGE_LENGTH]
+        LOGGER.warning("send_merge room_id=%s parts=%d", room_id, len(remaining) + 1)
+        if self._config.typing_before_send:
+            self._set_typing(room_id, merged)
+        self._deliver_once(room_id, merged)
+        self._next_send_at = self._monotonic() + self._interval_seconds()
 
     # -- main loop ---------------------------------------------------------
 

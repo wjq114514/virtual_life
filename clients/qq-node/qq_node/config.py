@@ -81,6 +81,17 @@ def safe_url(
     return value.rstrip("/")
 
 
+MAX_GROUPS = 16
+MAX_GROUP_SENDERS = 64
+
+
+@dataclass(frozen=True)
+class GroupBinding:
+    group_id: int
+    companion_id: str
+    senders: tuple[int, ...] = ()
+
+
 @dataclass(frozen=True)
 class QQConfig:
     server_url: str
@@ -91,6 +102,7 @@ class QQConfig:
     http_url: str
     access_token: str | None
     companions: tuple[str, ...]
+    groups: tuple[GroupBinding, ...]
     test_user_id: int | None
     interval_seconds: float
     request_timeout_seconds: float
@@ -98,6 +110,53 @@ class QQConfig:
     max_output_tokens: int
     screen_observer_node: str | None
     maintain_node: bool
+    send_interval_min_seconds: float
+    send_interval_jitter_seconds: float
+    send_max_retries: int
+    retry_backoff_initial_seconds: float
+    merge_on_limit: bool
+    max_messages_per_reply: int
+
+
+def _group_id(value: Any) -> int:
+    if type(value) is not int or not 1 <= value <= 2**63 - 1:
+        raise ConfigError("group_id_invalid")
+    return value
+
+
+def _parse_groups(value: Any) -> tuple[GroupBinding, ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, list) or len(value) > MAX_GROUPS:
+        raise ConfigError("groups_out_of_bounds")
+    bindings: list[GroupBinding] = []
+    seen: set[int] = set()
+    for item in value:
+        if not isinstance(item, dict):
+            raise ConfigError("groups_item_invalid")
+        entry = object_fields(
+            item, allowed={"group_id", "companion", "senders"}, required={"group_id", "companion"}
+        )
+        group_id = _group_id(entry["group_id"])
+        companion = text(entry["companion"], limit=128)
+        if group_id in seen:
+            raise ConfigError("groups_duplicate")
+        seen.add(group_id)
+        raw_senders = entry.get("senders", [])
+        if not isinstance(raw_senders, list) or len(raw_senders) > MAX_GROUP_SENDERS:
+            raise ConfigError("group_senders_out_of_bounds")
+        senders: list[int] = []
+        seen_senders: set[int] = set()
+        for sender in raw_senders:
+            sender_id = _group_id(sender)
+            if sender_id in seen_senders:
+                raise ConfigError("group_senders_duplicate")
+            seen_senders.add(sender_id)
+            senders.append(sender_id)
+        bindings.append(
+            GroupBinding(group_id=group_id, companion_id=companion, senders=tuple(senders))
+        )
+    return tuple(bindings)
 
 
 def load_config(path: Path) -> QQConfig:
@@ -116,6 +175,7 @@ def load_config(path: Path) -> QQConfig:
         "http_url",
         "access_token",
         "companions",
+        "groups",
         "test_user_id",
         "interval_seconds",
         "request_timeout_seconds",
@@ -123,6 +183,12 @@ def load_config(path: Path) -> QQConfig:
         "max_output_tokens",
         "screen_observer_node",
         "maintain_node",
+        "send_interval_min_seconds",
+        "send_interval_jitter_seconds",
+        "send_max_retries",
+        "retry_backoff_initial_seconds",
+        "merge_on_limit",
+        "max_messages_per_reply",
     }
     data = object_fields(
         source,
@@ -136,6 +202,10 @@ def load_config(path: Path) -> QQConfig:
     if not isinstance(raw_companions, list) or len(raw_companions) > MAX_COMPANIONS:
         raise ConfigError("companions_out_of_bounds")
     companions = tuple(text(item, limit=128) for item in raw_companions)
+    groups = _parse_groups(data.get("groups"))
+    merge_on_limit = data.get("merge_on_limit", True)
+    if not isinstance(merge_on_limit, bool):
+        raise ConfigError("merge_on_limit_invalid")
     access_token = data.get("access_token")
     if access_token is not None and not isinstance(access_token, str):
         raise ConfigError("access_token_invalid")
@@ -159,6 +229,7 @@ def load_config(path: Path) -> QQConfig:
         http_url=safe_url(data["http_url"], http=True),
         access_token=access_token,
         companions=companions,
+        groups=groups,
         test_user_id=test_user_id,
         interval_seconds=number(data.get("interval_seconds", 30), minimum=1, maximum=3600),
         request_timeout_seconds=number(
@@ -168,6 +239,24 @@ def load_config(path: Path) -> QQConfig:
         max_output_tokens=int(number(data.get("max_output_tokens", 512), minimum=1, maximum=1024)),
         screen_observer_node=screen_observer_node,
         maintain_node=maintain_node,
+        send_interval_min_seconds=number(
+            data.get("send_interval_min_seconds", 0.8), minimum=0, maximum=60
+        ),
+        send_interval_jitter_seconds=number(
+            data.get("send_interval_jitter_seconds", 1.2), minimum=0, maximum=60
+        ),
+        send_max_retries=int(number(data.get("send_max_retries", 3), minimum=0, maximum=10)),
+        retry_backoff_initial_seconds=number(
+            data.get("retry_backoff_initial_seconds", 2), minimum=0.1, maximum=60
+        ),
+        merge_on_limit=merge_on_limit,
+        max_messages_per_reply=int(
+            number(data.get("max_messages_per_reply", 3), minimum=1, maximum=20)
+        ),
+        # `typing_before_send` is intentionally absent: OneBot v11 (and NapCat's
+        # implementation of it) has no typing/input-status action for personal QQ
+        # chats; the only typing signal is the *inbound* `notice_type=typing`
+        # event, which this node already reports as an attention sample.
     )
 
 

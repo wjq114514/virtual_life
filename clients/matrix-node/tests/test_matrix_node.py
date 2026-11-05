@@ -276,6 +276,7 @@ class FakeApi:
 class FakeMatrix:
     def __init__(self):
         self.sent = []
+        self.typing = []
         self.logins = 0
 
     def login(self):
@@ -287,6 +288,9 @@ class FakeMatrix:
     def send_text(self, room_id, text):
         self.sent.append((room_id, text))
         return "$ev"
+
+    def set_typing(self, room_id, user_id, timeout_ms):
+        self.typing.append((room_id, user_id, timeout_ms))
 
 
 class TestRuntime(unittest.TestCase):
@@ -494,9 +498,16 @@ class TestRuntime(unittest.TestCase):
                     ("!room1:matrix.example.org", "那一栏挺简洁的。"),
                 ],
             )
-        # drain_sends paces ONE bubble per cycle.
+        # drain_sends paces ONE bubble per cycle; the second call inside the
+        # interval window must NOT send. Advance a fake clock past the gate.
+        clock = FakeClock()
+        runtime._monotonic = clock.monotonic
+        runtime._sleep = clock.sleep
         runtime.drain_sends()
         self.assertEqual(client.sent, [("!room1:matrix.example.org", "嗯，看到了。")])
+        runtime.drain_sends()
+        self.assertEqual(len(client.sent), 1)
+        clock.advance(runtime._next_send_at)
         runtime.drain_sends()
         self.assertEqual(
             client.sent,
@@ -505,6 +516,10 @@ class TestRuntime(unittest.TestCase):
                 ("!room1:matrix.example.org", "那一栏挺简洁的。"),
             ],
         )
+        # typing notifier is set before each bubble
+        self.assertEqual(len(client.typing), 2)
+        self.assertEqual(client.typing[0][0], "!room1:matrix.example.org")
+        self.assertEqual(client.typing[0][1], "@bot:matrix.example.org")
 
     def test_sidecar_verification_sas_surfaced(self):
         """SAS emoji/decimal events are surfaced and stored on the runtime."""
@@ -605,6 +620,169 @@ class _FakeBridge:
     def send_verification_command(self, action, transaction_id=None):
         self.verification_commands.append((action, transaction_id))
         return {}
+
+
+class FakeClock:
+    def __init__(self):
+        self.now = 1000.0
+        self.sleeps = []
+
+    def monotonic(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.sleeps.append(seconds)
+        self.now += seconds
+
+    def advance(self, to):
+        self.now = max(self.now, to)
+
+
+class FlakyMatrix:
+    def __init__(self, fail_times):
+        self.fail_times = fail_times
+        self.sent = []
+        self.typing = []
+
+    def login(self):
+        pass
+
+    def send_text(self, room_id, text):
+        if self.fail_times > 0:
+            self.fail_times -= 1
+            raise MatrixError("matrix_http_error", status=429)
+        self.sent.append((room_id, text))
+        return "$ev"
+
+    def set_typing(self, room_id, user_id, timeout_ms):
+        self.typing.append((room_id, user_id, timeout_ms))
+
+
+class TestPacing(unittest.TestCase):
+    def _runtime(self, client=None, **cfg_overrides):
+        path = Path("/tmp/mx_pacing_config.json")
+        cfg = dict(CONFIG)
+        cfg.update(cfg_overrides)
+        path.write_text(json.dumps(cfg), encoding="utf-8")
+        config = load_config(path)
+        api = FakeApi()
+        client = client or FakeMatrix()
+        runtime = MatrixRuntime(config, api, client)
+        clock = FakeClock()
+        runtime._monotonic = clock.monotonic
+        runtime._sleep = clock.sleep
+        runtime._clock = clock
+        return runtime, api, client
+
+    def test_interval_between_bubbles_at_least_min(self):
+        runtime, _, client = self._runtime(send_interval_jitter_seconds=0)
+        runtime._send_text("!r:x", "a")
+        runtime._send_text("!r:x", "b")
+        runtime.drain_sends()
+        first_at = runtime._next_send_at
+        # epsilon: floating monotonic vs interval arithmetic
+        self.assertGreaterEqual(first_at - 1000.0, 0.8 - 1e-6)
+        self.assertLessEqual(first_at - 1000.0, 0.8 + 1e-6)
+        self.assertEqual(len(client.sent), 1)
+        runtime._clock.advance(runtime._next_send_at)
+        runtime.drain_sends()
+        self.assertEqual(len(client.sent), 2)
+
+    def test_typing_duration_is_length_proportional_with_floor(self):
+        runtime, _, client = self._runtime(typing_min_seconds=2, typing_chars_per_second=10)
+        runtime._send_text("!r:x", "abc")  # 0.3s proportional -> floor 2s
+        runtime.drain_sends()
+        self.assertEqual(client.typing[0][2], 2000)
+        runtime._clock.advance(runtime._next_send_at)
+        runtime._send_text("!r:x", "x" * 100)  # 10s proportional
+        runtime.drain_sends()
+        self.assertEqual(client.typing[1][2], 10000)
+
+    def test_typing_disabled(self):
+        runtime, _, client = self._runtime(typing_before_send=False)
+        runtime._send_text("!r:x", "a")
+        runtime.drain_sends()
+        self.assertEqual(client.typing, [])
+        self.assertEqual(client.sent, [("!r:x", "a")])
+
+    def test_failure_retries_with_exponential_backoff_then_succeeds(self):
+        client = FlakyMatrix(fail_times=2)
+        runtime, _, _ = self._runtime(
+            client, send_max_retries=2, retry_backoff_initial_seconds=2,
+            send_interval_jitter_seconds=0,
+        )
+        runtime._send_text("!r:x", "hi")
+        runtime.drain_sends()
+        self.assertEqual(runtime._clock.sleeps, [2, 4])
+        self.assertEqual(client.sent, [("!r:x", "hi")])
+
+    def test_retries_exhausted_merges_remaining_bubbles_into_one(self):
+        client = FlakyMatrix(fail_times=1)
+        runtime, _, _ = self._runtime(
+            client, send_max_retries=0, send_interval_jitter_seconds=0,
+        )
+        runtime._send_text("!r:x", "one")
+        runtime._send_text("!r:x", "two")
+        runtime.drain_sends()
+        self.assertEqual(client.sent, [("!r:x", "one\ntwo")])
+        with runtime._lock:
+            self.assertEqual(list(runtime._send_queue), [])
+
+    def test_merge_keeps_bubbles_of_other_rooms(self):
+        client = FlakyMatrix(fail_times=1)
+        runtime, _, _ = self._runtime(
+            client, send_max_retries=0, send_interval_jitter_seconds=0,
+        )
+        runtime._send_text("!r:x", "one")
+        runtime._send_text("!other:x", "other-room")
+        runtime.drain_sends()
+        # exhausted retries -> "one" is retried once as a merged single message
+        self.assertEqual(client.sent, [("!r:x", "one")])
+        with runtime._lock:
+            self.assertEqual(list(runtime._send_queue), [("!other:x", "other-room")])
+
+    def test_max_messages_per_reply_caps_bubbles(self):
+        runtime, api, _ = self._runtime(max_messages_per_reply=2)
+        api.dialogue_result = {
+            "status": "completed",
+            "assistant_message": "x",
+            "reply_messages": ["a", "b", "c", "d"],
+        }
+        runtime._handle_message(
+            {
+                "room_id": "!room1:matrix.example.org",
+                "sender": "@user:matrix.example.org",
+                "type": "m.room.message",
+                "content": {"msgtype": "m.text", "body": "你好"},
+            }
+        )
+        with runtime._lock:
+            self.assertEqual(
+                list(runtime._send_queue),
+                [("!room1:matrix.example.org", "a"), ("!room1:matrix.example.org", "b")],
+            )
+
+
+class TestSetTyping(unittest.TestCase):
+    def test_set_typing_builds_request(self):
+        opener = FakeOpener([_canned({})])
+        client = MatrixClient(
+            "https://matrix.example.org",
+            "@bot:matrix.example.org",
+            auth_method="password",
+            password="secret",
+            timeout_seconds=5,
+            opener=opener,
+        )
+        client._access_token = "tok"
+        client.set_typing("!room:x", "@bot:matrix.example.org", 2500)
+        request = opener.requests[0]
+        self.assertEqual(request.get_method(), "PUT")
+        self.assertIn(
+            "/rooms/%21room%3Ax/typing/%40bot%3Amatrix.example.org", request.full_url
+        )
+        body = json.loads(request.data.decode("utf-8"))
+        self.assertEqual(body, {"typing": True, "timeout": 2500})
 
 
 if __name__ == "__main__":

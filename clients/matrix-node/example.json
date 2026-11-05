@@ -23,5 +23,14 @@
   "e2ee_sidecar": null,
   "e2ee_config": null,
   "screen_observer_node": null,
-  "maintain_node": false
+  "maintain_node": false,
+  "send_interval_min_seconds": 0.8,
+  "send_interval_jitter_seconds": 1.2,
+  "typing_before_send": true,
+  "typing_min_seconds": 0.5,
+  "typing_chars_per_second": 12,
+  "send_max_retries": 3,
+  "retry_backoff_initial_seconds": 2,
+  "merge_on_limit": true,
+  "max_messages_per_reply": 3
 }

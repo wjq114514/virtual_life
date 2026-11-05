@@ -88,11 +88,11 @@ systemctl --user status node-keep-qq.service
 
 ## systemd
 
-`systemd/node-keep-qq.service` 与 `systemd/node-keep-android.service`
-分别维持 `qq-room` 与安卓观察节点 `android-9edb439ece7b6fef` 的心跳；
-其中 `node-keep-qq` 的配置带 `companion` 块，因此它也负责 `proact-demo`
-的 lease 续期。两者都 `After=virtual-life-runtime.service`，
-`Restart=always`。
+`systemd/node-keep-qq.service`、`systemd/node-keep-android.service` 与
+`systemd/node-keep-matrix.service` 分别维持 `qq-room`、安卓观察节点
+`android-9edb439ece7b6fef` 与 `matrix-room` 的心跳；其中 `node-keep-qq`
+的配置带 `companion` 块，因此它也负责 `proact-demo` 的 lease 续期。三者都
+`After=virtual-life-runtime.service`，`Restart=always`。
 
 ## 与二角色拆分的关系
 

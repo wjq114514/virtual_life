@@ -7,6 +7,7 @@ NapCat's HTTP action server.
 """
 
 import logging
+import random
 import threading
 import time
 import uuid
@@ -15,7 +16,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from .api import ApiClient, TransportError
-from .config import QQConfig
+from .config import GroupBinding, QQConfig
 from .onebot import HttpActionError, NapCatActionClient, OneBotServer, WebSocketError
 
 LOGGER = logging.getLogger(__name__)
@@ -41,13 +42,20 @@ class QQRuntime:
         self._session_id = str(uuid.uuid4())
         self._registered = False
         self._last_typing_at: dict[int, float] = {}
-        # FIFO queue of (recipient_id, text) pairs. A dict would collapse
-        # multi-bubble replies for the same user, so replies are paced one
-        # message per drain_sends() cycle instead.
-        self._send_queue: deque[tuple[int, str]] = deque()
+        # FIFO queue of (message_type, target_id, text) triples, where
+        # message_type is "private" or "group". A dict would collapse
+        # multi-bubble replies for the same chat, so replies are paced one
+        # message per drain_sends() cycle with an interval + jitter between
+        # bubbles (MaiBot-style netizen pacing) instead.
+        self._send_queue: deque[tuple[str, int, str]] = deque()
         self._lock = threading.Lock()
+        self._next_send_at = 0.0
         self._server: OneBotServer | None = None
         self._actions: NapCatActionClient | None = None
+        # Injectable for tests: fake clock / fake sleep keep pacing and
+        # backoff assertions deterministic without real delays.
+        self._monotonic = time.monotonic
+        self._sleep = time.sleep
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -95,6 +103,16 @@ class QQRuntime:
             return None
         return self._config.companions[0]
 
+    def _group_binding(self, group_id: int, user_id: int) -> GroupBinding | None:
+        for binding in self._config.groups:
+            if binding.group_id != group_id:
+                continue
+            if binding.senders and user_id not in binding.senders:
+                LOGGER.info("group_sender_not_allowed group_id=%s user_id=%s", group_id, user_id)
+                return None
+            return binding
+        return None
+
     # -- OneBot event handling --------------------------------------------
 
     def _extract_text(self, message: Any) -> str:
@@ -123,7 +141,7 @@ class QQRuntime:
 
     def _handle_message(self, event: dict[str, Any]) -> None:
         message_type = event.get("message_type")
-        if message_type != "private":
+        if message_type not in ("private", "group"):
             return
         user_id = event.get("user_id")
         if not isinstance(user_id, int):
@@ -131,10 +149,33 @@ class QQRuntime:
         text = self._extract_text(event.get("message"))
         if not text:
             return
-        companion = self._companion_for(user_id)
-        if companion is None:
-            LOGGER.info("no_companion user_id=%s", user_id)
-            return
+        if message_type == "group":
+            group_id = event.get("group_id")
+            if not isinstance(group_id, int):
+                return
+            binding = self._group_binding(group_id, user_id)
+            if binding is None:
+                LOGGER.info("no_companion group_id=%s", group_id)
+                return
+            companion = binding.companion_id
+            chat_type: str = "group"
+            target_id = group_id
+            sender = event.get("sender")
+            display_name = ""
+            if isinstance(sender, dict):
+                card = sender.get("card")
+                nickname = sender.get("nickname")
+                display_name = card if isinstance(card, str) and card else (
+                    nickname if isinstance(nickname, str) else ""
+                )
+        else:
+            companion = self._companion_for(user_id)
+            if companion is None:
+                LOGGER.info("no_companion user_id=%s", user_id)
+                return
+            chat_type = "private"
+            target_id = user_id
+            display_name = str(event.get("nickname", user_id))
         try:
             state = self._api.get_companion(companion)
         except TransportError as exc:
@@ -170,7 +211,7 @@ class QQRuntime:
             "epoch": epoch,
             "expected_revision": revision,
             "user_message": text[:MAX_MESSAGE_LENGTH],
-            "user_name": str(event.get("nickname", user_id)),
+            "user_name": display_name or str(user_id),
             "max_output_tokens": self._config.max_output_tokens,
         }
         # The companion resides on this QQ node, but the screen may be captured
@@ -190,10 +231,12 @@ class QQRuntime:
         if status in ("completed", "silent") and result.get("assistant_message"):
             # The server may split a long reply into short netizen-style bubbles
             # (reply_messages). Send each bubble as its own paced message; fall
-            # back to the single canonical assistant_message when no split is present.
+            # back to the single canonical assistant_message when no split is
+            # present. max_messages_per_reply is a second cap aligned with the
+            # server's reply_split_max_messages.
             bubbles = result.get("reply_messages") or [result["assistant_message"]]
-            for bubble in bubbles:
-                self._send_private(user_id, bubble)
+            for bubble in bubbles[: self._config.max_messages_per_reply]:
+                self._enqueue(chat_type, target_id, bubble)
 
     def _handle_notice(self, event: dict[str, Any]) -> None:
         notice_type = event.get("notice_type")
@@ -215,27 +258,102 @@ class QQRuntime:
 
     # -- sending -----------------------------------------------------------
 
-    def _send_private(self, user_id: int, text: str) -> None:
+    def _enqueue(self, message_type: str, target_id: int, text: str) -> None:
         if not text:
             return
         with self._lock:
-            self._send_queue.append((user_id, text[:MAX_MESSAGE_LENGTH]))
+            self._send_queue.append((message_type, target_id, text[:MAX_MESSAGE_LENGTH]))
+
+    def _interval_seconds(self) -> float:
+        return self._config.send_interval_min_seconds + random.uniform(
+            0, self._config.send_interval_jitter_seconds
+        )
+
+    def _deliver_once(
+        self, message_type: str, target_id: int, text: str
+    ) -> dict[str, Any] | None:
+        """One send attempt. Returns the action result or None on failure."""
+        try:
+            if message_type == "group":
+                result = self._actions.send_group(target_id, text)
+            else:
+                result = self._actions.send_private(target_id, text)
+        except HttpActionError as exc:
+            LOGGER.warning(
+                "send_failed message_type=%s target_id=%s reason=%s",
+                message_type,
+                target_id,
+                exc.code,
+            )
+            return None
+        status = result.get("status")
+        if status not in (None, "ok", "async"):
+            LOGGER.warning(
+                "send_failed message_type=%s target_id=%s status=%s",
+                message_type,
+                target_id,
+                status,
+            )
+            return None
+        return result
+
+    def _deliver_with_retry(self, message_type: str, target_id: int, text: str) -> bool:
+        """Deliver one bubble with exponential backoff. True on success."""
+        attempt = 0
+        while True:
+            result = self._deliver_once(message_type, target_id, text)
+            if result is not None:
+                return True
+            if attempt >= self._config.send_max_retries:
+                return False
+            delay = self._config.retry_backoff_initial_seconds * (2**attempt)
+            LOGGER.warning(
+                "send_retry message_type=%s target_id=%s attempt=%d delay=%.1fs",
+                message_type,
+                target_id,
+                attempt + 1,
+                delay,
+            )
+            self._sleep(delay)
+            attempt += 1
 
     def drain_sends(self) -> None:
+        """Send at most one queued bubble per call, paced by interval + jitter.
+
+        Retries a failing bubble with exponential backoff up to
+        send_max_retries; when the retries are exhausted and merge_on_limit is
+        set, the remaining bubbles for the same chat are merged into a single
+        message and sent as one last attempt (frequency-limit fallback).
+        """
         if self._actions is None:
+            return
+        if self._monotonic() < self._next_send_at:
             return
         with self._lock:
             if not self._send_queue:
                 return
-            user_id, text = self._send_queue.popleft()
-        try:
-            result = self._actions.send_private(user_id, text)
-        except HttpActionError as exc:
-            LOGGER.warning("send_failed user_id=%s reason=%s", user_id, exc.code)
+            message_type, target_id, text = self._send_queue.popleft()
+        if self._deliver_with_retry(message_type, target_id, text):
+            self._next_send_at = self._monotonic() + self._interval_seconds()
             return
-        status = result.get("status")
-        if status not in (None, "ok", "async"):
-            LOGGER.warning("send_failed user_id=%s status=%s", user_id, status)
+        if not self._config.merge_on_limit:
+            return
+        # Merge whatever is left for the same chat into one message and try a
+        # final single delivery; if that fails too, drop with a log.
+        with self._lock:
+            remaining = [item for item in self._send_queue if item[0:2] == (message_type, target_id)]
+            self._send_queue = deque(
+                item for item in self._send_queue if item[0:2] != (message_type, target_id)
+            )
+        merged = "\n".join([text] + [item[2] for item in remaining])[:MAX_MESSAGE_LENGTH]
+        LOGGER.warning(
+            "send_merge message_type=%s target_id=%s parts=%d",
+            message_type,
+            target_id,
+            len(remaining) + 1,
+        )
+        self._deliver_once(message_type, target_id, merged)
+        self._next_send_at = self._monotonic() + self._interval_seconds()
 
     # -- main loop ---------------------------------------------------------
 

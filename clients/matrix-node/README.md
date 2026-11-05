@@ -54,6 +54,8 @@ python3 matrix_node.py --config example.json
 - `maintain_node`（可选，默认 `true`）：本客户端是否负责节点的注册与心跳。三角色拆分后置为 `false`，节点在线由 `node-keep` 维持，本客户端只收发消息。
 - `screen_observer_node`（可空）是屏幕观察节点 ID（如 Android 采集节点）。设置后，对话请求会附带 `screen_reference: {node_id: screen_observer_node}`，把该观察节点的最新帧注入本轮对话（屏幕视觉注入）；不设置时对话不携带引用，按旧行为使用对话节点自身的帧（需该节点具备 `vision.capture`）。
 - `sync_timeout_ms` 是 sync 长轮询超时（默认 30000）；`interval_seconds` 是心跳间隔。
+- **发送节奏**（可选，均为客户端本地配置）：`send_interval_min_seconds`（默认 `0.8`）条间最小间隔；`send_interval_jitter_seconds`（默认 `1.2`）条间 0..jitter 均匀随机抖动；`send_max_retries`（默认 `3`）发送失败重试次数；`retry_backoff_initial_seconds`（默认 `2`）指数退避初值（2s、4s、8s…）；`merge_on_limit`（默认 `true`）退避耗尽后把同一房间的剩余段落合并为一条再发一次；`max_messages_per_reply`（默认 `3`，与服务端 `dialogue.reply_split_max_messages` 对齐）客户端侧拆条上限。服务端 `reply_messages` 已拆条时逐条发送，未拆条时退回整条单发。
+- **typing**：`typing_before_send`（默认 `true`）在每条消息发送前先 `PUT /rooms/{id}/typing/{user}` 置输入状态；`typing_min_seconds`（默认 `0.5`）最短输入时长，`typing_chars_per_second`（默认 `12`）按长度估计输入时长 `max(typing_min, len/chars_per_second)`。typing 失败只记日志，不阻塞发送。
 
 Matrix 事件映射：
 

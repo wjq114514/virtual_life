@@ -181,6 +181,16 @@ class MatrixClient:
             "POST", f"/_matrix/client/v3/join/{quote(room_id_or_alias, safe='')}", auth=True
         )
 
+    def set_typing(self, room_id: str, user_id: str, timeout_ms: int) -> dict[str, Any]:
+        """PUT /rooms/{roomId}/typing/{userId}: set the typing notifier."""
+        path = (
+            f"/_matrix/client/v3/rooms/{quote(room_id, safe='')}"
+            f"/typing/{quote(user_id, safe='')}"
+        )
+        return self._request(
+            "PUT", path, payload={"typing": True, "timeout": int(timeout_ms)}, auth=True
+        )
+
     # -- transport ---------------------------------------------------------
 
     def _request(

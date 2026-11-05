@@ -1,6 +1,6 @@
 # QQ 节点桥（NapCat）
 
-把 QQ（经 **NapCat** 的 OneBot v11 双通道）接入 Virtual Life。QQ 私聊消息映射为对话轮次，「正在输入 / 在线」映射为 attention 样本（`user_present` + `activity=chat`），伙伴回复通过 NapCat HTTP 接口 `send_private_msg` 回发。
+把 QQ（经 **NapCat** 的 OneBot v11 双通道）接入 Virtual Life。QQ 私聊 / 群聊消息映射为对话轮次，「正在输入 / 在线」映射为 attention 样本（`user_present` + `activity=chat`），伙伴回复经 `reply_messages` 拆条后逐条带节奏回发（私聊 `send_private_msg`，群聊 `send_group_msg`）。
 
 NapCat 按 OneBot v11 部署为两个通道：
 
@@ -19,6 +19,9 @@ python3 qq_node.py --config example.json
 - `node_id` 是注册到运行时的房间节点；它会成为伙伴的 `active_node_id`（当伙伴跟随到 QQ 房间时）。
 - `websocket_url` 是本进程监听的反向 WS 地址（NapCat 连入）；`http_url` 是 NapCat 的 HTTP 动作服务器地址；`access_token` 是两侧共用的 OneBot 令牌（可空，需与 NapCat 配置一致）。
 - `companions` 是目前绑定的伙伴 ID 列表（每个 QQ 用户映射到列表第一个伙伴）。
+- `groups`（可选，默认 `[]`）是群聊绑定列表：`[{"group_id": 123, "companion": "sui", "senders": [10001]}]`。`group_id` 是群号；`companion` 是该群映射的伙伴；`senders`（可选）是允许触发对话的成员 QQ 号白名单，缺省时群里任何人的消息都会触发对话。回复用 `send_group_msg` 发回同群。
+- **发送节奏**（可选，均为客户端本地配置）：`send_interval_min_seconds`（默认 `0.8`）条间最小间隔；`send_interval_jitter_seconds`（默认 `1.2`）条间附加的 0..jitter 均匀随机抖动；`send_max_retries`（默认 `3`）发送失败重试次数；`retry_backoff_initial_seconds`（默认 `2`）指数退避初值（2s、4s、8s…）；`merge_on_limit`（默认 `true`）退避耗尽后把同一会话的剩余段落合并为一条再发一次；`max_messages_per_reply`（默认 `3`，与服务端 `dialogue.reply_split_max_messages` 对齐）客户端侧拆条上限。服务端 `reply_messages` 已拆条时逐条发送，未拆条时退回整条单发。
+- **typing 说明（降级）**：OneBot v11 / NapCat 没有私聊「输入状态」动作（`set_input_status` 属 QQ 官方机器人 API，NapCat 不可用），因此发送前置 typing 在 QQ 侧不实现；入站方向已有 `notice_type=typing` → attention 样本。Matrix 侧 typing 见 matrix-node。
 - `test_user_id` 是好友测试消息的固定接收人（QQ 号），避免误发他人。
 - `maintain_node`（可选，默认 `true`）：本客户端是否负责节点的注册与心跳。三角色拆分后置为 `false`，节点在线由 `node-keep` 维持，本客户端只收发消息。
 - `screen_observer_node`（可空）是屏幕观察节点 ID（如 Android 采集节点）。设置后，对话请求会附带 `screen_reference: {node_id: screen_observer_node}`，把该观察节点的最新帧注入本轮对话（屏幕视觉注入）；不设置时对话不携带引用，按旧行为使用对话节点自身的帧（需该节点具备 `vision.capture`）。

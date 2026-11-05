@@ -107,6 +107,15 @@ class MatrixConfig:
     max_output_tokens: int
     screen_observer_node: str | None
     maintain_node: bool
+    send_interval_min_seconds: float
+    send_interval_jitter_seconds: float
+    typing_before_send: bool
+    typing_min_seconds: float
+    typing_chars_per_second: float
+    send_max_retries: int
+    retry_backoff_initial_seconds: float
+    merge_on_limit: bool
+    max_messages_per_reply: int
     e2ee: bool
     e2ee_sidecar: str | None
     e2ee_config: dict[str, Any] | None
@@ -175,6 +184,15 @@ def load_config(path: Path) -> MatrixConfig:
         "max_output_tokens",
         "screen_observer_node",
         "maintain_node",
+        "send_interval_min_seconds",
+        "send_interval_jitter_seconds",
+        "typing_before_send",
+        "typing_min_seconds",
+        "typing_chars_per_second",
+        "send_max_retries",
+        "retry_backoff_initial_seconds",
+        "merge_on_limit",
+        "max_messages_per_reply",
         "e2ee",
         "e2ee_sidecar",
         "e2ee_config",
@@ -208,6 +226,12 @@ def load_config(path: Path) -> MatrixConfig:
     maintain_node = data.get("maintain_node", True)
     if not isinstance(maintain_node, bool):
         raise ConfigError("maintain_node_invalid")
+    typing_before_send = data.get("typing_before_send", True)
+    if not isinstance(typing_before_send, bool):
+        raise ConfigError("typing_before_send_invalid")
+    merge_on_limit = data.get("merge_on_limit", True)
+    if not isinstance(merge_on_limit, bool):
+        raise ConfigError("merge_on_limit_invalid")
     e2ee_config = data.get("e2ee_config")
     if e2ee_config is not None:
         object_fields(
@@ -256,6 +280,25 @@ def load_config(path: Path) -> MatrixConfig:
             else None
         ),
         maintain_node=maintain_node,
+        send_interval_min_seconds=number(
+            data.get("send_interval_min_seconds", 0.8), minimum=0, maximum=60
+        ),
+        send_interval_jitter_seconds=number(
+            data.get("send_interval_jitter_seconds", 1.2), minimum=0, maximum=60
+        ),
+        typing_before_send=typing_before_send,
+        typing_min_seconds=number(data.get("typing_min_seconds", 0.5), minimum=0.1, maximum=60),
+        typing_chars_per_second=number(
+            data.get("typing_chars_per_second", 12), minimum=0.5, maximum=100
+        ),
+        send_max_retries=int(number(data.get("send_max_retries", 3), minimum=0, maximum=10)),
+        retry_backoff_initial_seconds=number(
+            data.get("retry_backoff_initial_seconds", 2), minimum=0.1, maximum=60
+        ),
+        merge_on_limit=merge_on_limit,
+        max_messages_per_reply=int(
+            number(data.get("max_messages_per_reply", 3), minimum=1, maximum=20)
+        ),
         e2ee=e2ee,
         e2ee_sidecar=e2ee_sidecar,
         e2ee_config=e2ee_config,
