@@ -68,8 +68,8 @@ uv run uvicorn virtual_life.main:app --env-file .env --host 127.0.0.1 --port 800
 | `[scene_classifier]` | 本地场景分类器模式（off/observe/route）、模型产物、推理后端、超时与标签到回复模型的映射 |
 | `[automatic_memory]` | 自动记忆开关、批次、最大等待、轮询、输出 token 上限 |
 | `[proactivity]` | 注意力边界与内在活动候选的 poll_seconds，默认 2 秒；开关与限额通过伙伴策略 API 保存 |
-| `[inner_life]` | 心理活动开关、轮询、活动间隔/TTL、证据门槛、主动冲动阈值与可选模型评判 |
-| `[dialogue]` | 前缘抑制式消息防抖 `debounce_seconds`（窗口内后续用户消息被吸收、只回复一次 silent，0=关闭，默认 0）；回复拆条 `reply_split_enabled`/`reply_split_max_messages`/`reply_split_max_chars`（把长回复拆成多条短消息供 IM 逐条发送，默认关闭，3 条 / 120 字） |
+| `[inner_life]` | 心理活动开关、轮询、活动间隔/TTL、证据门槛、主动冲动阈值、可选模型评判与实验性内心动作（adb 看屏幕/开应用） |
+| `[dialogue]` | 前缘抑制式消息防抖 `debounce_seconds`（窗口内后续用户消息被吸收、只回复一次 silent，0=关闭，默认 0）；攒批静默窗口 `batch_seconds`（需 `debounce_seconds`>0，且**必须满足 `debounce_seconds` > `batch_seconds`**，否则启动时校验直接报错：攒批依赖 debounce 窗口吸收批等待期间到达的后续消息，若 debounce ≤ batch，每条碎片消息都会各自触发模型调用、先到者在生成后被丢弃；推荐组合 `debounce_seconds=4.0` + `batch_seconds=3.0`：首条消息等待用户静默该秒数后，把窗口内后续消息合并为一次 preview+一次模型调用，原条目保留在 history；每有新消息重置等待，整批硬上限 8s，0=关闭，默认 0）；回复拆条 `reply_split_enabled`/`reply_split_max_messages`/`reply_split_max_chars`（把长回复拆成多条短消息供 IM 逐条发送，默认关闭，3 条 / 120 字）；错别字发生器 `typo_enabled`/`typo_error_rate`（实验性人类化机制，默认严格关闭：以 error_rate 概率在最终回复做最多 1 处同音/近音字替换，仅在 mood ∈ {cheerful, amused, excited} 高唤醒时生效；会触碰最终回复文本，独立开关可随时关；error_rate 0.03、上限 0.2）；词频库 `vocabulary_enabled`（jargon_miner 本地化：从用户消息统计高频词、加权抽 2-3 条注入 prompt 旁注，纯本地零模型成本，默认开启）；LLM 语义断句 `llm_split_enabled`/`llm_split_threshold`（MaiBot llm_sentence_splitter 保守移植，默认关闭：回复超过 threshold 字（默认 80）时用主模型在原文中选切分点，返回必须逐字还原原文否则回退规则拆分，token 计入对话账本） |
 | `[tools]` | 模型工具总开关、单轮最大调用数（1..2）与受信任插件工厂，默认关闭 |
 | `[delegation]` | 外部代理 argv、工作目录、超时、输出上限与环境变量白名单，默认关闭 |
 | `[proactive_schedule]` | `schedule_next_proactive` 的延迟边界与到点静默要求 |
@@ -107,7 +107,7 @@ uv run uvicorn virtual_life.main:app --env-file .env --host 127.0.0.1 --port 800
 - `models`：`route` 模式使用的标签到回复模型映射，例如 `models = { explicit = "local-uncensored-model", intimate = "local-uncensored-model" }`。至少需要一项非空模型；空值或未列出的标签使用默认模型。
 - `observe` 模式另外输出每轮一条 `scene_classifier` INFO 日志（标签、四路分数、延迟、错误码，不含原文）。回执中的观察结果可用 `scripts/export_scene_observations.py` 批量导出后人工核对，详见 [场景分类器实现说明](nsfw-classifier-implementation.md)。
 
-分类器不是内容过滤器，也不改变输出权限。需要 `uv sync --group train` 才能安装 `onnxruntime`/`transformers`（或 PyTorch 后端依赖）；未安装时 `observe`/`route` 会安全降级。`GET /v1/capabilities` 的 `scene_classifier` 对象报告模式、可用性、后端与版本，不返回原始用户文本。分类器只处理普通文本和语音用户回合；主动对话没有用户场景，不运行分类器，回执中的 `scene` 为 null。
+分类器不是内容过滤器，也不改变输出权限。本地推理后端（`auto`/`onnx`/`torch`）需要 `uv sync --group train` 才能安装 `onnxruntime`/`transformers`（或 PyTorch 后端依赖）。也可以用 `backend="service"`：运行时通过 HTTP 调用独立分类服务（`scripts/nsfw_server.py`，`service_url` 指向其地址，可选 `service_token` Bearer 鉴权），运行时进程本身不需要训练依赖；服务不可达时同样安全降级。`GET /v1/capabilities` 的 `scene_classifier` 对象报告模式、可用性、后端与版本，不返回原始用户文本。分类器只处理普通文本和语音用户回合；主动对话没有用户场景，不运行分类器，回执中的 `scene` 为 null。
 
 ## 客户端分发配置
 
@@ -160,9 +160,15 @@ curl -H "Authorization: Bearer $OWNER_TOKEN" \
 | `inner_life.poll_seconds` | `VIRTUAL_LIFE_INNER_LIFE_POLL_SECONDS` |
 | `inner_life.<其余字段>` | `VIRTUAL_LIFE_INNER_LIFE_<字段大写>` |
 | `dialogue.debounce_seconds` | `VIRTUAL_LIFE_DIALOGUE_DEBOUNCE_SECONDS` |
+| `dialogue.batch_seconds` | `VIRTUAL_LIFE_DIALOGUE_BATCH_SECONDS` |
 | `dialogue.reply_split_enabled` | `VIRTUAL_LIFE_DIALOGUE_REPLY_SPLIT_ENABLED` |
 | `dialogue.reply_split_max_messages` | `VIRTUAL_LIFE_DIALOGUE_REPLY_SPLIT_MAX_MESSAGES` |
 | `dialogue.reply_split_max_chars` | `VIRTUAL_LIFE_DIALOGUE_REPLY_SPLIT_MAX_CHARS` |
+| `dialogue.typo_enabled` | `VIRTUAL_LIFE_DIALOGUE_TYPO_ENABLED`（实验性，默认 false） |
+| `dialogue.typo_error_rate` | `VIRTUAL_LIFE_DIALOGUE_TYPO_ERROR_RATE` |
+| `dialogue.vocabulary_enabled` | `VIRTUAL_LIFE_DIALOGUE_VOCABULARY_ENABLED` |
+| `dialogue.llm_split_enabled` | `VIRTUAL_LIFE_DIALOGUE_LLM_SPLIT_ENABLED`（默认 false） |
+| `dialogue.llm_split_threshold` | `VIRTUAL_LIFE_DIALOGUE_LLM_SPLIT_THRESHOLD` |
 | `tools.<字段>` | `VIRTUAL_LIFE_TOOLS_<字段大写>`；plugins 使用 JSON 数组 |
 | `delegation.<字段>` | `VIRTUAL_LIFE_DELEGATION_<字段大写>`；command/env_allowlist 使用 JSON 数组 |
 | `proactive_schedule.<字段>` | `VIRTUAL_LIFE_PROACTIVE_SCHEDULE_<字段大写>` |
@@ -235,7 +241,7 @@ TOML 中的 `file_path` 相对配置文件目录解析；环境变量与默认�
 
 ## 情感配置
 
-新增 `[emotion]`，默认 enabled=true、half_life_seconds=1200、candidate_limit=256、resonance_strength=0.2。环境变量为 `VIRTUAL_LIFE_EMOTION_<字段大写>`，优先于文件；修改后重启。完全使用本地规则，不增加模型调用。字段范围和禁用行为见[情感实现](emotion.md)。
+新增 `[emotion]`，默认 enabled=true、half_life_seconds=1200、candidate_limit=256、resonance_strength=0.2。环境变量为 `VIRTUAL_LIFE_EMOTION_<字段大写>`，优先于文件；修改后重启。默认完全使用本地规则，不增加模型调用；可选 appraise_model_enabled=false（开启后 observe 先走模型评估、严格 JSON，失败/超时/非法输出自动回退本地规则；appraise_model_name=""（留空沿用共享 [model]，可填更快的专用模型）、appraise_model_timeout_seconds=2.0、appraise_model_output_tokens=200，模型调用共享每日 token 账本，reason/appraisal_version 标记 model_v1）。字段范围和禁用行为见[情感实现](emotion.md)。
 
 ## 人格进化配置
 
@@ -251,7 +257,7 @@ L2 慢变量只读、聚合时不写库、不调用模型：读取时从 `emotio
 
 ## 内在活动配置
 
-新增 `[inner_life]`，默认 enabled=true、poll_seconds=10、min_activity_gap_seconds=600、activity_ttl_seconds=3600、min_evidence_items=1、proactive_urge_threshold=0.65、proactive_min_idle_seconds=1200、idle_saturation_seconds=1800、max_history=200。模型评判默认关闭；开启时使用 model_min_interval_seconds=3600、model_daily_limit=24、model_output_token_limit=200、model_min_confidence=0.55、model_weight=0.5，并共享每日模型 token 账本。`inner_life.<其余字段>` 使用 `VIRTUAL_LIFE_INNER_LIFE_<字段大写>`；`poll_seconds` 使用 `VIRTUAL_LIFE_INNER_LIFE_POLL_SECONDS`。
+新增 `[inner_life]`，默认 enabled=true、poll_seconds=10、min_activity_gap_seconds=600、activity_ttl_seconds=3600、min_evidence_items=1、proactive_urge_threshold=0.65、proactive_min_idle_seconds=1200、idle_saturation_seconds=1800、max_history=200、rhythm_enabled=true、rhythm_timezone="Asia/Shanghai"（本地时间节律，纯本地不调模型：深夜 23:00-05:00 social 需求 ×0.6、凌晨 0-5 点 rest 权重提高；时段与钟点作为自然语言旁注注入人格提示，rhythm_timezone 为任意 IANA 名称、无效时回退服务器本地时区）。模型评判默认关闭；开启时使用 model_min_interval_seconds=3600、model_daily_limit=24、model_output_token_limit=200、model_min_confidence=0.55、model_weight=0.5，并共享每日模型 token 账本。`inner_life.<其余字段>` 使用 `VIRTUAL_LIFE_INNER_LIFE_<字段大写>`；`poll_seconds` 使用 `VIRTUAL_LIFE_INNER_LIFE_POLL_SECONDS`。实验性内心动作默认关闭；开启时使用 action_enabled=true、action_min_interval_seconds=1800、action_daily_limit=8、action_curious_min_salience=0.35、action_observer_node_id=""、action_adb_serial=""、action_open_app_whitelist=()、action_screenshot_dir=".data/inner_actions"、action_analysis_wait_seconds=45；环境变量按同一规则映射（`VIRTUAL_LIFE_INNER_LIFE_ACTION_OPEN_APP_WHITELIST` 为 JSON 字符串数组）。语义见[内在活动](inner-life.md)的“内心动作（实验性）”一节。
 
 内在活动的内容和模板始终由本地规则生成，不修改人格、情绪或长期记忆。显式开启 `model_assisted` 后，模型只评判标签、强度与置信度，`rationale` 仅供审计且不进入提示；失败时回退本地规则。活动可以成为主动候选，但仅在伙伴主动策略开启、注意力新鲜且空闲、已有历史对话、冲动与冷却/每日限额均满足时才会经过对话输出 gate；默认阈值较高，新伙伴或专注场景不会因此频繁开口。接口与语义见[内在活动](inner-life.md)。
 

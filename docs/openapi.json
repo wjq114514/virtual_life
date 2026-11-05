@@ -8100,6 +8100,16 @@
             ],
             "title": "Reply Messages"
           },
+          "reply_split_engine": {
+            "type": "string",
+            "enum": [
+              "none",
+              "rules",
+              "llm"
+            ],
+            "title": "Reply Split Engine",
+            "default": "none"
+          },
           "source_event_id": {
             "anyOf": [
               {
@@ -8486,7 +8496,8 @@
               "explicit_appreciation",
               "explicit_distress",
               "explicit_question",
-              "quiet_request"
+              "quiet_request",
+              "model_v1"
             ],
             "title": "Reason"
           },
@@ -8894,7 +8905,9 @@
               "quiet_request_rate",
               "proactive_silent_rate",
               "correction_rate",
-              "preference_repeat"
+              "preference_repeat",
+              "relationship_warmth",
+              "shared_vocabulary"
             ],
             "title": "Metric"
           },
@@ -9002,7 +9015,9 @@
                   "quiet_request_rate",
                   "proactive_silent_rate",
                   "correction_rate",
-                  "preference_repeat"
+                  "preference_repeat",
+                  "relationship_warmth",
+                  "shared_vocabulary"
                 ]
               },
               {

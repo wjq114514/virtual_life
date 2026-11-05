@@ -77,8 +77,13 @@ extra_body = {}
 mode = "off"
 # 相对路径以本配置文件所在目录为基准（仅显式写入时）；环境变量路径按工作目录解析。
 artifact = ".data/nsfw_classifier/model/final"
-# auto / onnx / torch；auto 在安装 onnxruntime 且存在 ONNX 文件时优先 ONNX。
+# auto / onnx / torch / service；auto 在安装 onnxruntime 且存在 ONNX 文件时优先 ONNX；
+# service 走独立 HTTP 分类服务（scripts/nsfw_server.py），运行时进程不需要训练依赖。
 backend = "auto"
+# backend = "service" 时必填（http/https），指向分类服务地址。
+# service_url = "http://127.0.0.1:8039"
+# 可选 Bearer token；为空表示无鉴权。
+# service_token = ""
 max_length = 128
 # 0 表示使用运行时默认线程数。
 threads = 0
@@ -147,24 +152,55 @@ proactive_urge_threshold = 0.65
 proactive_min_idle_seconds = 1200
 idle_saturation_seconds = 1800
 max_history = 200
+# 本地时间节律（纯本地，不调模型）：深夜 23:00-05:00 压低 social 需求
+# （×0.6）、凌晨 0-5 点提高 rest 权重；时段文案同步注入人格提示旁注。
+# timezone 为任意 IANA 名称，无效时回退服务器本地时区。
+rhythm_enabled = true
+rhythm_timezone = "Asia/Shanghai"
+# 内心动作（实验性）：curious/restless 且 salience 达阈值时，通过 adb 观察或
+# 操作本机模拟器（看=截屏，做=打开白名单应用）。模拟器不在线则静默跳过。
+# action_enabled = true
+# action_min_interval_seconds = 1800
+# action_daily_limit = 8
+# action_curious_min_salience = 0.35
+# action_observer_node_id = ""
+# action_adb_serial = "emulator-5554"
+# action_open_app_whitelist = ["com.android.chrome", "com.google.android.deskclock"]
+# action_screenshot_dir = ".data/inner_actions"
+# action_analysis_wait_seconds = 45
 
 [dialogue]
 # 前缘抑制式消息防抖：窗口内后续用户消息被吸收、只回复一次（silent），
 # 不消耗模型调用；0 表示关闭。用于合并短时间连续输入。
 debounce_seconds = 0.0
+# 攒批静默窗口：开启防抖后，首条消息被接受后等待用户静默 batch_seconds，
+# 把窗口内到达的后续消息合并为一次 preview + 一次模型调用（原消息保留在
+# history 条目中）。需要 debounce_seconds > 0 才生效；0 表示关闭。等待会在
+# 每有新消息到达时重置一次，整批硬上限 8 秒。
+batch_seconds = 0.0
 # 回复拆条（netizen 风格）：把较长的 assistant_message 拆成多条短消息，
 # 由 IM 客户端逐条发送。仅在开启时生效；关闭时 reply_messages 为 None，
 # 客户端回退到整条 assistant_message。max_messages 限制条数，max_chars 限制单条长度。
 reply_split_enabled = false
 reply_split_max_messages = 3
 reply_split_max_chars = 120
-model_assisted = false
-model_min_interval_seconds = 3600
-model_daily_limit = 24
-model_output_token_limit = 200
-model_min_confidence = 0.55
-model_weight = 0.5
-# 环境变量优先：VIRTUAL_LIFE_INNER_LIFE_<字段大写>
+# 错别字发生器（实验性人类化机制，MaiBot typo_generator 保守移植）：
+# 以 error_rate 概率在最终回复里做最多 1 处同音/近音字替换（的/地/得、
+# 再/在 等高频人错对）。仅在高唤醒情绪 mood ∈ {cheerful, amused, excited}
+# 时生效。注意：这会触碰最终回复文本，违反"不改写模型输出"的一般原则，
+# 因此默认严格关闭、独立开关，可随时关掉。error_rate 上限 0.2。
+typo_enabled = false
+typo_error_rate = 0.03
+# 词频库（MaiBot jargon_miner 本地化）：从已完成的用户消息里统计高频词
+# （中文 2/3-gram + ASCII 词元，本地统计、零模型成本），按 habits 同款
+# 加权抽 2-3 条注入 prompt 旁注。词表只作参考，不写死进最终回复。
+vocabulary_enabled = true
+# LLM 语义断句（MaiBot llm_sentence_splitter 保守移植，默认关闭）：
+# 回复超过 llm_split_threshold 字时，用主模型在原文中选切分点；
+# 返回必须逐字还原原文（拼接去空白一致），否则回退上面的规则拆分。
+# 模型只决定"在哪切"，不改写任何文字；token 计入对话账本。
+llm_split_enabled = false
+llm_split_threshold = 80
 
 [memory]
 default_recall_tokens = 800
@@ -247,6 +283,14 @@ half_life_seconds = 1200
 # resource_half_life_seconds = 2400
 candidate_limit = 256
 resonance_strength = 0.2
+# 模型化情绪评估（默认关）：开启后 observe 先走模型（严格 JSON），
+# 失败/超时/非法输出自动回退本地正则；模型调用计入共享 token 额度。
+appraise_model_enabled = false
+# 情绪评估专用模型名（可选）：留空沿用共享 [model]；建议填更快的模型
+# （如 [free]deepseek-v4.1-flash），避免长超时拖慢对话事务。
+# appraise_model_name = ""
+appraise_model_timeout_seconds = 2.0
+appraise_model_output_tokens = 200
 
 [embedding]
 # 独立向量模型；启用后自动回填已有记忆，模型调用使用共享 token 额度。

@@ -7,7 +7,7 @@ import re
 import tomllib
 from dataclasses import dataclass, field, fields
 from pathlib import Path
-from typing import get_args
+from typing import get_args, get_origin
 from urllib.parse import urlsplit
 
 from pydantic import TypeAdapter, ValidationError
@@ -80,9 +80,15 @@ _CONFIG_SECTIONS = {
     "inner_life": {"poll_seconds": "inner_life_poll_seconds"},
     "dialogue": {
         "debounce_seconds": "dialogue_debounce_seconds",
+        "batch_seconds": "dialogue_batch_seconds",
         "reply_split_enabled": "dialogue_reply_split_enabled",
         "reply_split_max_messages": "dialogue_reply_split_max_messages",
         "reply_split_max_chars": "dialogue_reply_split_max_chars",
+        "typo_enabled": "dialogue_typo_enabled",
+        "typo_error_rate": "dialogue_typo_error_rate",
+        "vocabulary_enabled": "dialogue_vocabulary_enabled",
+        "llm_split_enabled": "dialogue_llm_split_enabled",
+        "llm_split_threshold": "dialogue_llm_split_threshold",
     },
     "tools": {
         "enabled": "tools_enabled",
@@ -217,6 +223,7 @@ _INTEGER_FIELDS = (
     "webui_session_days",
     "dialogue_reply_split_max_messages",
     "dialogue_reply_split_max_chars",
+    "dialogue_llm_split_threshold",
 )
 _NUMBER_FIELDS = (
     "proactivity_poll_seconds",
@@ -234,6 +241,8 @@ _NUMBER_FIELDS = (
 )
 _NONNEGATIVE_NUMBER_FIELDS = (
     "dialogue_debounce_seconds",
+    "dialogue_batch_seconds",
+    "dialogue_typo_error_rate",
 )
 _WEIGHT_FIELDS = ("rerank_rrf_weight",)
 
@@ -259,6 +268,13 @@ def _environment_value(name: str, kind: type) -> object:
             if not isinstance(parsed, kind):
                 raise ValueError
             return parsed
+        if get_origin(kind) in (tuple, list) or kind in (tuple, list):
+            parsed = json.loads(value)
+            if not isinstance(parsed, list) or not all(
+                isinstance(item, str) for item in parsed
+            ):
+                raise ValueError
+            return tuple(parsed)
         return kind(value)
     except (ValueError, TypeError, RecursionError):
         raise ValueError(f"{name} has an invalid {kind.__name__} value") from None
@@ -590,9 +606,29 @@ class Settings:
     proactivity_poll_seconds: float = 2.0
     inner_life_poll_seconds: float = 10.0
     dialogue_debounce_seconds: float = 0.0
+    # Quiet-window message batching: after the first message of a burst is
+    # accepted, wait this many seconds of user silence, then merge the follow-up
+    # messages (absorbed by the debounce window) into one preview/model call.
+    # Requires debounce_seconds > 0; 0 disables batching.
+    dialogue_batch_seconds: float = 0.0
     dialogue_reply_split_enabled: bool = False
     dialogue_reply_split_max_messages: int = 3
     dialogue_reply_split_max_chars: int = 120
+    # LLM 语义断句（MaiBot llm_sentence_splitter 保守移植）：长回复交给主模型
+    # 在原文中选切分点；返回必须逐字还原原文，否则回退规则拆分。默认关闭。
+    dialogue_llm_split_enabled: bool = False
+    # 触发阈值：assistant_message 长度超过该字数才尝试 LLM 断句。
+    dialogue_llm_split_threshold: int = 80
+    # Experimental typo generator (MaiBot typo_generator port): may swap one
+    # same/near-sound character in the final reply, only in high-arousal
+    # moods (cheerful/amused/excited). Default OFF — it intentionally touches
+    # the final reply text, so it needs its own explicit switch.
+    dialogue_typo_enabled: bool = False
+    dialogue_typo_error_rate: float = 0.03
+    # Companion-level user word-frequency bank (jargon_miner port): mine
+    # high-frequency words from completed user messages and inject a seeded
+    # 2-3 word sample as a prompt aside. Local statistics only.
+    dialogue_vocabulary_enabled: bool = True
     tools_enabled: bool = False
     tools_max_calls_per_turn: int = 1
     tools_plugins: tuple[str, ...] = ()
@@ -831,10 +867,35 @@ class Settings:
             raise ValueError("Automatic memory external must be a boolean")
         if type(self.dialogue_reply_split_enabled) is not bool:
             raise ValueError("Dialogue reply split enabled must be a boolean")
+        if type(self.dialogue_typo_enabled) is not bool:
+            raise ValueError("Dialogue typo enabled must be a boolean")
+        if type(self.dialogue_llm_split_enabled) is not bool:
+            raise ValueError("Dialogue llm split enabled must be a boolean")
+        if type(self.dialogue_llm_split_threshold) is not int:
+            raise ValueError("Dialogue llm split threshold must be an integer")
+        if self.dialogue_llm_split_threshold < 1:
+            raise ValueError("Dialogue llm split threshold must be >= 1")
+        if type(self.dialogue_vocabulary_enabled) is not bool:
+            raise ValueError("Dialogue vocabulary enabled must be a boolean")
+        if not 0 <= self.dialogue_typo_error_rate <= 0.2 or not math.isfinite(
+            self.dialogue_typo_error_rate
+        ):
+            raise ValueError("Dialogue typo error rate must be between 0 and 0.2")
         if self.dialogue_reply_split_max_messages < 1:
             raise ValueError("Dialogue reply split max messages must be >= 1")
         if self.dialogue_reply_split_max_chars < 1:
             raise ValueError("Dialogue reply split max chars must be >= 1")
+        if self.dialogue_batch_seconds > 0 and self.dialogue_debounce_seconds <= (
+            self.dialogue_batch_seconds
+        ):
+            # Batching only works when the debounce window can still absorb the
+            # follow-ups that arrive while a batch waits; otherwise every burst
+            # message becomes its own model call and the older turns are
+            # discarded after generation.
+            raise ValueError(
+                "dialogue.batch_seconds requires dialogue.debounce_seconds to be "
+                "strictly greater than batch_seconds (e.g. debounce=4.0 batch=3.0)"
+            )
         if (
             not _finite_positive(self.auto_memory_external_timeout_seconds)
             or self.auto_memory_external_timeout_seconds > 86400
@@ -989,6 +1050,9 @@ class Settings:
                                 "rerank_enabled",
                                 "auto_follow_rooms",
                                 "dialogue_reply_split_enabled",
+                                "dialogue_typo_enabled",
+                                "dialogue_vocabulary_enabled",
+                                "dialogue_llm_split_enabled",
                             )
                             else dict
                         )

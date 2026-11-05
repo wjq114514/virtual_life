@@ -188,6 +188,7 @@ from .tools import (
     ToolRegistry,
     build_tool_plugins,
 )
+from .vocabulary import VocabularyBank
 from .voice_api import build_voice_router
 from .voice_service import VoiceService
 
@@ -391,6 +392,13 @@ def create_app(
             extra_body=settings.model_extra_body,
         )
     inner_life.attach_model(provider, settings.model_name)
+    # Emotion appraisal model channel: same shared provider, optionally with a
+    # dedicated (typically faster) model via [emotion] appraise_model_name;
+    # disabled unless [emotion] appraise_model_enabled is set. Falls back to
+    # local rules.
+    emotion.attach_model(
+        provider, settings.emotion_policy.appraise_model_name or settings.model_name
+    )
     personality_evolution = PersonalityEvolutionService(
         personality,
         emotion,
@@ -400,10 +408,19 @@ def create_app(
         model_name=settings.model_name,
         token_estimator=token_estimator,
     )
+    # Companion-level user word-frequency bank (jargon_miner port): shares the
+    # same durable database as every other service.
+    vocabulary_bank = VocabularyBank(
+        coordinator.store,
+        enabled=settings.dialogue_vocabulary_enabled,
+    )
     personality_prompts = PersonalityPromptBuilder(
         memory,
         policy=personality_policy or settings.personality_policy,
         token_estimator=token_estimator,
+        vocabulary=vocabulary_bank,
+        rhythm_enabled=settings.inner_life_policy.rhythm_enabled,
+        rhythm_timezone=settings.inner_life_policy.rhythm_timezone,
     )
     automatic_memory = AutoMemoryService(
         memory,
@@ -477,9 +494,15 @@ def create_app(
         screen_service=screen_vision,
         scene_classifier=scene_classifier,
         debounce_seconds=settings.dialogue_debounce_seconds,
+        batch_seconds=settings.dialogue_batch_seconds,
         reply_split_enabled=settings.dialogue_reply_split_enabled,
         reply_split_max_messages=settings.dialogue_reply_split_max_messages,
         reply_split_max_chars=settings.dialogue_reply_split_max_chars,
+        llm_split_enabled=settings.dialogue_llm_split_enabled,
+        llm_split_threshold=settings.dialogue_llm_split_threshold,
+        typo_enabled=settings.dialogue_typo_enabled,
+        typo_error_rate=settings.dialogue_typo_error_rate,
+        vocabulary=vocabulary_bank,
     )
     if speech_provider is not None:
         speech_registry = SpeechProviderRegistry(speech_provider)
@@ -1020,13 +1043,21 @@ def create_app(
                     "model_available": provider is not None and bool(settings.model_name),
                     "affects": "prompt_and_proactive_trigger",
                     "proactive_trigger": True,
+                    "actions": {
+                        "enabled": inner_life.policy.action_enabled
+                        and bool(inner_life.policy.action_adb_serial),
+                        "serial": inner_life.policy.action_adb_serial,
+                        "open_app_whitelist": list(
+                            inner_life.policy.action_open_app_whitelist
+                        ),
+                    },
                     "policy": inner_life.policy.model_dump(mode="json"),
                 },
             },
             "emotion": {
                 "policy": emotion.policy.model_dump(mode="json"),
                 "persistent": True,
-                "appraisal_version": "rules_v2",
+                "appraisal_version": "rules_v3",
                 "correction_kinds": ["direction", "intensity", "attribution"],
                 "dimensional_recovery": True,
                 "model_calls": 0,

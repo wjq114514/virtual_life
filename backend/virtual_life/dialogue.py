@@ -7,7 +7,7 @@ import re
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from time import perf_counter
+from time import monotonic, perf_counter, sleep
 from typing import Literal
 
 from pydantic import (
@@ -27,8 +27,9 @@ from .models import Identifier, JsonObject
 from .personality import PersonalityError
 from .personality_prompt import PersonalityPreview, PersonalityPreviewResult
 from .ports import ModelRequest, ModelUsage, ToolResult
-from .reply_split import split_reply
+from .reply_split import llm_split_reply, split_reply
 from .scene_classifier.runtime import SceneObservation
+from .typo import apply_typo
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +55,14 @@ _COMMIT_TTL_SECONDS = 300
 # once (to the first message) and later turns return a silent receipt without a
 # provider call. This is a leading-edge, non-blocking suppression.
 _DEBOUNCE_EVENT = "companion.dialogue_received"
+
+# Message batching (MaiBot debounce/natural port): when batch_seconds > 0 (and
+# debounce suppression is active), the first message of a burst waits for a
+# quiet window before previewing; messages that arrive during the window are
+# merged into one user_message (originals kept as history entries), so one
+# preview and one model call answer the whole burst. The wait loop resets once
+# per new arrival and is capped by this hard limit.
+_BATCH_HARD_CAP_SECONDS = 8.0
 
 
 def strip_speaker_prefix(text: str, companion_name: str) -> str:
@@ -215,6 +224,11 @@ class DialogueResult(BaseModel):
     # for IM clients. Present only for completed replies; None means "send
     # assistant_message as one message" (the legacy behavior).
     reply_messages: list[str] | None = None
+    # Observability for reply_messages: "llm" = the model chose the split
+    # points and passed the verbatim check; "rules" = deterministic
+    # sentence/clause splitter (including the LLM fallback path); "none" =
+    # splitting disabled or the turn never produced a completed reply.
+    reply_split_engine: Literal["none", "rules", "llm"] = "none"
     source_event_id: Identifier | None = None
     accepted_event_id: Identifier | None = None
     emotion: EmotionSnapshot | None = None
@@ -254,9 +268,15 @@ class DialogueService:
         scene_classifier=None,
         clock=None,
         debounce_seconds: float = 0.0,
+        batch_seconds: float = 0.0,
         reply_split_enabled: bool = False,
         reply_split_max_messages: int = 3,
         reply_split_max_chars: int = 120,
+        llm_split_enabled: bool = False,
+        llm_split_threshold: int = 80,
+        typo_enabled: bool = False,
+        typo_error_rate: float = 0.03,
+        vocabulary=None,
     ) -> None:
         self.coordinator = coordinator
         self.personality_service = personality_service
@@ -279,9 +299,24 @@ class DialogueService:
         self.voice_service = None
         self.tool_runtime = None
         self.debounce_seconds = debounce_seconds
+        # Quiet-window message batching; requires debounce suppression so the
+        # messages merged into this turn do not also dispatch their own replies.
+        self.batch_seconds = batch_seconds
         self.reply_split_enabled = reply_split_enabled
         self.reply_split_max_messages = reply_split_max_messages
         self.reply_split_max_chars = reply_split_max_chars
+        # LLM semantic sentence split (MaiBot llm_sentence_splitter, conservative):
+        # the model may only choose cut points in the original text; its answer is
+        # accepted only when it reproduces the source verbatim, otherwise the
+        # deterministic split_reply rules apply. Off by default.
+        self.llm_split_enabled = llm_split_enabled
+        self.llm_split_threshold = llm_split_threshold
+        # Experimental typo generator (MaiBot typo_generator port): OFF by
+        # default; touches the final reply text only in high-arousal moods.
+        self.typo_enabled = typo_enabled
+        self.typo_error_rate = typo_error_rate
+        # Optional companion-level user word-frequency bank (jargon_miner).
+        self.vocabulary = vocabulary
         paths = {
             self.store.database_path,
             personality_service.store.database_path,
@@ -354,6 +389,40 @@ class DialogueService:
         except (ValueError, TypeError):
             return False
         return now - last < timedelta(seconds=window)
+
+    def _await_batch(self, companion_id: str, received: dict) -> tuple[list[str], dict]:
+        """Quiet-window batching: wait for the user to stop typing, then merge.
+
+        Sleeps one batch window; if new ``companion.dialogue_received`` events
+        arrived meanwhile (each already emitted by its own ``_send`` claim), the
+        window resets once per arrival up to a hard cap. Returns the texts of
+        the messages merged after ``received`` and an anchor dict carrying the
+        latest accepted event's sequence/event_id, which the caller uses for the
+        emotion freshness guard and resonance. Only messages that were absorbed
+        by the debounce suppression are ever merged here — a dispatched turn is
+        never modified.
+        """
+        deadline = monotonic() + _BATCH_HARD_CAP_SECONDS
+        anchor = {"sequence": received["sequence"], "event_id": received["event_id"]}
+        texts: list[str] = []
+        while True:
+            sleep(self.batch_seconds)
+            with self.store.transaction() as connection:
+                rows = connection.execute(
+                    """SELECT sequence, event_id, payload_json FROM events
+                    WHERE companion_id = ? AND type = ? AND sequence > ?
+                    ORDER BY sequence""",
+                    (companion_id, _DEBOUNCE_EVENT, anchor["sequence"]),
+                ).fetchall()
+            if rows:
+                for row in rows:
+                    payload = json.loads(row["payload_json"])
+                    text = payload.get("user_message", "")
+                    if text:
+                        texts.append(str(text))
+                anchor = {"sequence": rows[-1]["sequence"], "event_id": rows[-1]["event_id"]}
+            if not rows or monotonic() >= deadline:
+                return texts, anchor
 
     def history(
         self, companion_id: str, before_sequence: int | None = None, limit: int = 20
@@ -649,6 +718,22 @@ class DialogueService:
             if not proactive and self.tool_runtime is not None:
                 self.tool_runtime.on_user_turn(connection, companion_id, now)
         mark("claim_ms")
+        # Quiet-window batching (only for ordinary user dialogue, and only when
+        # debounce suppression is active so merged messages cannot double-reply).
+        # The waiting turn merges the absorbed follow-ups into its own prompt;
+        # already-dispatched turns are never touched.
+        merged_messages: list[str] = []
+        anchor = {"sequence": received["sequence"], "event_id": received["event_id"]}
+        if (
+            not proactive
+            and not voice_request
+            and self.batch_seconds > 0
+            and self.debounce_seconds > 0
+        ):
+            merged_messages, anchor = self._await_batch(companion_id, received)
+        merged_text = (
+            "\n".join([request.user_message, *merged_messages])[:4096] if merged_messages else None
+        )
         task_id = "dialogue-" + hashlib.sha256(request.command_id.encode()).hexdigest()
         reserved = False
         stream_invalidated = None
@@ -679,7 +764,7 @@ class DialogueService:
                     not proactive
                     and emotion
                     and emotion["enabled"]
-                    and emotion["source_event_id"] != received["event_id"]
+                    and emotion["source_event_id"] != anchor["event_id"]
                 ):
                     raise DialogueError(
                         409, "dialogue_context_changed", "A newer user event was accepted"
@@ -694,6 +779,17 @@ class DialogueService:
                         503, "model_not_configured", "Dialogue model is not configured"
                     )
             preview_payload = {key: data[key] for key in PersonalityPreview.model_fields}
+            if merged_text is not None:
+                # The burst is answered as one turn: the follow-up texts merge
+                # into this turn's user_message while the original entries stay
+                # visible as history items (bounded by the preview's 20-entry cap).
+                preview_payload = dict(preview_payload)
+                preview_payload["user_message"] = merged_text
+                prior_entries = [
+                    {"role": "user", "content": text[:4096]} for text in merged_messages
+                ]
+                combined_history = list(preview_payload.get("history", [])) + prior_entries
+                preview_payload["history"] = combined_history[-20:]
             preview = self.prompt_builder.preview(
                 *snapshots,
                 preview_payload,
@@ -757,9 +853,9 @@ class DialogueService:
                     self.emotion_service.resonate(
                         connection,
                         companion_id,
-                        received["event_id"],
+                        anchor["event_id"],
                         preview["memory_versions"],
-                        request.user_message[:2048],
+                        (merged_text or request.user_message)[:2048],
                         now,
                     )
                     snapshots = self._snapshots(connection, companion_id, request, now)
@@ -912,7 +1008,11 @@ class DialogueService:
                 and not voice_request
                 and preview["participation"]["respond"]
                 and self.debounce_seconds > 0
+                and not merged_messages
             ):
+                # Messages merged into this turn's batch already arrived; the
+                # debounce check would treat them as "a newer turn exists" and
+                # silence this reply, defeating batching.
                 with self.store.transaction() as connection:
                     if self._debounced(connection, companion_id, self._now(), received["sequence"]):
                         debounced = True
@@ -954,6 +1054,26 @@ class DialogueService:
                                 409, "dialogue_context_changed", "Personality or state changed"
                             )
                         self._validate_references(connection, companion_id, preview, self._now())
+                        # Waste guard (E2E Bug#2): a burst whose follow-ups were
+                        # NOT merged into this turn (anchor covers only the
+                        # merged ones) means a newer turn already claimed. The
+                        # final gate would discard this reply after a full model
+                        # generation; the same check here discards it before
+                        # the provider is ever called. Idempotent replays
+                        # return the stored receipt earlier and never reach
+                        # this point, so replay semantics are unchanged.
+                        if not proactive and not voice_request:
+                            newer = connection.execute(
+                                "SELECT sequence FROM events WHERE companion_id = ? "
+                                "AND type = ? AND sequence > ? LIMIT 1",
+                                (companion_id, _DEBOUNCE_EVENT, anchor["sequence"]),
+                            ).fetchone()
+                            if newer is not None:
+                                raise DialogueError(
+                                    409,
+                                    "dialogue_context_changed",
+                                    "A newer user event was accepted",
+                                )
                 except Exception:
                     self.memory_service.release_model_tokens(companion_id, task_id)
                     reserved = False
@@ -1214,7 +1334,13 @@ class DialogueService:
                 mark=mark,
                 stream_invalidated=stream_invalidated,
                 control=control,
-                received=received,
+                # emotion.complete anchors the batch's latest accepted event
+                # (== received when no follow-up messages were merged).
+                received={
+                    **received,
+                    "event_id": anchor["event_id"],
+                    "sequence": anchor["sequence"],
+                },
                 streaming=on_event is not None,
             )
         except (MemoryError, PersonalityError, DomainError) as exc:
@@ -1279,6 +1405,34 @@ class DialogueService:
                 result.discard_reason = control.reason
                 result.assistant_message = None
             if result.status == "completed":
+                # Vocabulary bank (jargon_miner port): mine this completed
+                # user message inside the same single write transaction.
+                # Statistics failures never fail the dialogue turn.
+                if self.vocabulary is not None and not proactive:
+                    try:
+                        self.vocabulary.observe(connection, companion_id, request.user_message)
+                    except Exception:
+                        logger.exception("vocabulary observe failed companion_id=%s", companion_id)
+                # Experimental typo generator: gated by config AND
+                # high-arousal mood; deterministic per command so the
+                # receipt replays the same text. Applied before the
+                # completed event and reply split so all downstream views
+                # agree.
+                if self.typo_enabled and result.assistant_message:
+                    state = snapshots[2] if snapshots else {}
+                    emotion = (state or {}).get("emotion") or {}
+                    mood = (
+                        (emotion.get("effective_state") or {}).get("mood")
+                        or (state or {}).get("mood")
+                        or ""
+                    )
+                    result.assistant_message = apply_typo(
+                        result.assistant_message,
+                        mood=mood,
+                        enabled=self.typo_enabled,
+                        error_rate=self.typo_error_rate,
+                        seed=f"{companion_id}:{request.command_id}",
+                    )
                 if not proactive:
                     self.memory_service.record_dialogue_usage(
                         connection,
@@ -1352,11 +1506,32 @@ class DialogueService:
                 and result.status == "completed"
                 and result.assistant_message
             ):
-                result.reply_messages = split_reply(
-                    result.assistant_message,
-                    max_messages=self.reply_split_max_messages,
-                    max_chars=self.reply_split_max_chars,
-                )
+                bubbles = None
+                if (
+                    self.llm_split_enabled
+                    and self.provider is not None
+                    and self.model_name.strip()
+                    and len(result.assistant_message) > self.llm_split_threshold
+                ):
+                    bubbles = llm_split_reply(
+                        result.assistant_message,
+                        self.provider,
+                        model=self.model_name,
+                        companion_id=companion_id,
+                        task_id=f"{request.command_id}:llm_split",
+                        max_messages=self.reply_split_max_messages,
+                        max_chars=self.reply_split_max_chars,
+                    )
+                    if bubbles is not None:
+                        result.reply_split_engine = "llm"
+                if bubbles is None:
+                    bubbles = split_reply(
+                        result.assistant_message,
+                        max_messages=self.reply_split_max_messages,
+                        max_chars=self.reply_split_max_chars,
+                    )
+                    result.reply_split_engine = "rules"
+                result.reply_messages = bubbles
             receipt = result.model_dump(mode="json")
             connection.execute(
                 "UPDATE dialogue_commands SET status = ?, result_json = ? WHERE command_id = ?",

@@ -1,0 +1,18 @@
+# Virtual Life Studio — an in-Harness workspace for the companion runtime.
+#
+# The Host half registers one read-only same-origin route
+# (`/virtual-life-studio`) that proxies GET requests to the Virtual Life API with
+# the configured Bearer token, so the browser never needs the token and never
+# hits a cross-origin request. The Client half registers a sidebar panel entry
+# and the matching main panel: formatted flow logs, memory records and stats,
+# the distilled knowledge graph, and the companion's inner life.
+- insert:
+    - id: virtual-life-studio
+      name: '@virtuallife/dsh-virtual-life-studio'
+      config:
+        baseUrl: http://127.0.0.1:8038
+        token: local-dev-token
+        companionId: proact-demo
+        refreshMs: 5000
+        logLimit: 300
+        route: /virtual-life-studio

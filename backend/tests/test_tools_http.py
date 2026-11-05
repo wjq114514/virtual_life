@@ -30,24 +30,20 @@ def build(tmp_path):
 def test_schedule_proactive_http_roundtrip(tmp_path):
     app = build(tmp_path)
     with TestClient(app, headers={"Authorization": "Bearer test-token"}) as client:
-        state = attach_desktop(client)
+        attach_desktop(client)
         body = {
             "command_id": "sch-1",
             "tool_call_id": "call-1",
             "delay_seconds": 900,
             "reason": "wait a bit",
         }
-        response = client.post(
-            "/v1/companions/sui/proactivity/schedule", json=body
-        )
+        response = client.post("/v1/companions/sui/proactivity/schedule", json=body)
         assert response.status_code == 200, response.text
         result = response.json()
         assert result["status"] == "scheduled"
         assert result["delay_seconds"] == 900
         # idempotent replay
-        replay = client.post(
-            "/v1/companions/sui/proactivity/schedule", json=body
-        )
+        replay = client.post("/v1/companions/sui/proactivity/schedule", json=body)
         assert replay.status_code == 200, replay.text
         assert replay.json()["status"] == "scheduled"
 
@@ -78,9 +74,7 @@ def test_scheduled_task_http_roundtrip(tmp_path):
             "details": "记得喝水",
             "delay_seconds": 120,
         }
-        response = client.post(
-            "/v1/companions/sui/scheduled-tasks", json=body
-        )
+        response = client.post("/v1/companions/sui/scheduled-tasks", json=body)
         assert response.status_code == 200, response.text
         task = response.json()
         assert task["status"] == "pending"
@@ -89,9 +83,7 @@ def test_scheduled_task_http_roundtrip(tmp_path):
         listing = client.get("/v1/companions/sui/scheduled-tasks").json()
         assert listing["total"] == 1
         # idempotent replay
-        replay = client.post(
-            "/v1/companions/sui/scheduled-tasks", json=body
-        )
+        replay = client.post("/v1/companions/sui/scheduled-tasks", json=body)
         assert replay.status_code == 200, replay.text
         assert replay.json()["task_id"] == task["task_id"]
 

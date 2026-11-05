@@ -1,97 +1,139 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-theme="dark">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width,initial-scale=1" />
-    <title>虚拟生命 · 实时日志与流程追踪</title>
+    <title>虚拟生命 · 观测台</title>
     <link rel="stylesheet" href="./app.css" />
+    <script>
+      // Resolve the theme before first paint so the page never flashes.
+      (function () {
+        try {
+          var saved = localStorage.getItem('vl.theme');
+          if (saved !== 'light' && saved !== 'dark') {
+            saved = window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+          }
+          document.documentElement.dataset.theme = saved;
+        } catch (error) {
+          document.documentElement.dataset.theme = 'dark';
+        }
+      })();
+    </script>
     <script src="./app.js" defer></script>
   </head>
   <body>
-    <div class="shell">
-      <header class="topbar">
-        <div class="brand">
+    <div class="shell" id="shell">
+      <aside class="rail" aria-label="主导航">
+        <div class="rail-brand">
           <span class="brand-mark" aria-hidden="true">✳</span>
-          <span>虚拟生命<small>VIRTUAL LIFE · LIVE</small></span>
+          <span class="brand-text">
+            虚拟生命
+            <small>OBSERVATORY</small>
+          </span>
         </div>
-        <div class="topbar-status">
-          <span class="status-dot" aria-hidden="true"></span>
-          <span id="connection">未连接</span>
+
+        <nav class="rail-nav" id="rail-nav">
+          <button class="nav-item is-active" type="button" data-view="overview">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M4 13h6V4H4zM14 20h6v-9h-6zM4 20h6v-4H4zM14 8h6V4h-6z" />
+            </svg>
+            <span class="nav-label">总览</span>
+          </button>
+          <button class="nav-item" type="button" data-view="logs">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M4 6h16M4 12h10M4 18h13" />
+            </svg>
+            <span class="nav-label">日志</span>
+          </button>
+          <button class="nav-item" type="button" data-view="events">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M3 12h4l2.5-7 4 14 2.5-7h5" />
+            </svg>
+            <span class="nav-label">事件</span>
+          </button>
+          <button class="nav-item" type="button" data-view="memories">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M4 7.5 12 4l8 3.5v9L12 20l-8-3.5zM4 7.5 12 11l8-3.5M12 11v9" />
+            </svg>
+            <span class="nav-label">记忆</span>
+          </button>
+          <button class="nav-item" type="button" data-view="graph">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <circle cx="6" cy="7" r="2.4" />
+              <circle cx="18" cy="8" r="2.4" />
+              <circle cx="11" cy="17" r="2.4" />
+              <path d="M8.1 8.1 15.9 8M7.2 9.3l2.6 5.4M16.5 10.2l-4 4.6" />
+            </svg>
+            <span class="nav-label">知识图谱</span>
+          </button>
+          <button class="nav-item" type="button" data-view="inner">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M12 21s-7-4.4-7-10a4.2 4.2 0 0 1 7-3 4.2 4.2 0 0 1 7 3c0 5.6-7 10-7 10z" />
+            </svg>
+            <span class="nav-label">内心活动</span>
+          </button>
+          <button class="nav-item" type="button" data-view="devices">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <rect x="3" y="5" width="12" height="9" rx="1.6" />
+              <rect x="17" y="9" width="4.5" height="10" rx="1.4" />
+              <path d="M6 18h7" />
+            </svg>
+            <span class="nav-label">设备</span>
+          </button>
+        </nav>
+
+        <div class="rail-foot">
+          <div class="conn" id="conn">
+            <span class="conn-dot" data-state="idle" aria-hidden="true"></span>
+            <span id="conn-text">未连接</span>
+          </div>
+          <button class="btn btn-ghost btn-block" type="button" id="btn-session">
+            管理令牌
+          </button>
         </div>
-      </header>
+      </aside>
 
-      <main class="panels">
-        <section class="panel" id="logs-pane" aria-labelledby="logs-title">
-          <header class="panel-head">
-            <h1 id="logs-title">实时日志</h1>
-            <div class="panel-actions">
-              <label class="level-filter">
-                级别
-                <select id="level-filter">
-                  <option value="ALL">全部</option>
-                  <option value="DEBUG">DEBUG</option>
-                  <option value="INFO">INFO</option>
-                  <option value="WARN">WARN</option>
-                  <option value="ERROR">ERROR</option>
-                  <option value="CRIT">CRIT</option>
-                </select>
-              </label>
-              <label class="follow">
-                <input id="follow" type="checkbox" checked /> 跟随
-              </label>
-              <button id="logs-clear" type="button">清空</button>
-            </div>
-          </header>
-          <div class="log-view" id="log-view" role="log" aria-live="polite">
-            <div class="log-empty" id="log-empty">
-              连接服务器后，这里会实时滚动运行日志。
-            </div>
+      <div class="workspace">
+        <header class="topbar">
+          <div class="topbar-main">
+            <h1 id="view-title">总览</h1>
+            <p id="view-sub">伙伴状态、记忆与运行时的整体视图</p>
           </div>
-          <footer class="panel-foot">
-            <span id="logs-status">未连接</span>
-          </footer>
-        </section>
+          <div class="topbar-actions">
+            <label class="field field-inline">
+              <span>伙伴</span>
+              <select id="companion-select" aria-label="选择伙伴"></select>
+            </label>
+            <label class="switch" title="自动刷新">
+              <input type="checkbox" id="auto-refresh" checked />
+              <span>实时</span>
+            </label>
+            <button class="btn" type="button" id="btn-refresh">刷新</button>
+            <button class="btn btn-icon" type="button" id="btn-theme" title="切换主题" aria-label="切换主题">
+              ◐
+            </button>
+          </div>
+        </header>
 
-        <section class="panel" id="flow-pane" aria-labelledby="flow-title">
-          <header class="panel-head">
-            <h1 id="flow-title">流程追踪</h1>
-            <div class="panel-actions">
-              <button id="flow-pause" type="button">暂停</button>
-              <button id="flow-clear" type="button">清空</button>
-            </div>
-          </header>
-          <div class="flow-view" id="flow-view" role="log" aria-live="polite">
-            <div class="flow-empty" id="flow-empty">
-              等待运行事件…（对话、迁移、记忆、主动陪伴）
-            </div>
-          </div>
-          <footer class="panel-foot">
-            <span id="flow-status">未连接</span>
-          </footer>
-        </section>
-      </main>
+        <div class="banner" id="banner" role="status" hidden></div>
+        <main class="view" id="view" tabindex="-1"></main>
+      </div>
     </div>
 
-    <dialog id="connection-dialog" aria-labelledby="connection-title">
-      <form method="dialog" id="connection-form">
-        <h2 id="connection-title">连接服务器</h2>
-        <label>
-          管理令牌
-          <input
-            id="token"
-            type="password"
-            autocomplete="off"
-            maxlength="512"
-            required
-          />
+    <dialog id="auth-dialog" aria-labelledby="auth-title">
+      <form id="auth-form" method="dialog">
+        <h2 id="auth-title">连接运行时</h2>
+        <p class="dialog-sub">
+          输入运行时的管理令牌。令牌只会写入 HttpOnly 会话 Cookie，页面脚本读不到它。
+        </p>
+        <label class="field field-block">
+          <span>管理令牌</span>
+          <input type="password" id="auth-token" autocomplete="current-password" placeholder="local-dev-token" required />
         </label>
-        <label class="remember">
-          <input id="remember" type="checkbox" checked /> 记住会话（HttpOnly Cookie）
-        </label>
-        <p class="error" id="connection-error" role="alert"></p>
+        <p class="dialog-error" id="auth-error" hidden></p>
         <div class="dialog-actions">
-          <button type="submit" id="connect">连接</button>
-          <button type="button" id="disconnect">断开</button>
+          <button class="btn btn-ghost" type="button" id="auth-cancel">取消</button>
+          <button class="btn btn-primary" type="submit" id="auth-submit">连接</button>
         </div>
       </form>
     </dialog>

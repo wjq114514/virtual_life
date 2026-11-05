@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Virtual Life Studio",
+    "description": "One panel for the companion runtime: formatted flow logs, memory records and stats, the distilled knowledge graph, and inner life. The Host half proxies read-only same-origin requests so the token never reaches the browser."
+  }
+}
