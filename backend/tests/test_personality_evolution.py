@@ -457,3 +457,66 @@ def test_evolution_clock_is_deterministic(runtime):
     proposal = refresh(client, "gen").json()["proposals"][0]
     assert proposal["created_at"].startswith("2025-01-01")
     assert proposal["expires_at"].startswith("2025-01-31")
+
+
+def seed_vocabulary(app, word, count):
+    ts = _timestamp(app.state.personality._now())
+    with app.state.proactivity.store.transaction(write=True) as connection:
+        connection.execute(
+            "INSERT OR REPLACE INTO vocabulary VALUES (?,?,?,?,?)",
+            ("sui", word, count, ts, 1),
+        )
+
+
+def test_relationship_warmth_moves_the_warmth_trait(runtime):
+    client, app, _, _, _ = runtime
+    assert send(runtime, "warm-1", "谢谢你听我说话").json()["status"] == "completed"
+    assert send(runtime, "warm-2", "有你陪着真好").json()["status"] == "completed"
+    events = client.get("/v1/companions/sui/emotion/experiences").json()["items"]
+    source_event_id = events[0]["event_id"]
+    for index in range(12):
+        memory = client.post(
+            "/v1/companions/sui/memories",
+            json={
+                "command_id": f"warm-mem-{index}",
+                "kind": "relationship",
+                "content": f"第{index + 1}段相处片段，话不需要说全。",
+                "source_event_id": source_event_id,
+                "source_node_id": "desk",
+                "importance": 0.7,
+            },
+        )
+        assert memory.status_code == 201, memory.text
+    result = refresh(client, "warm-gen").json()
+    metrics = [proposal["evidence"]["aggregates"][0]["metric"] for proposal in result["proposals"]]
+    assert "relationship_warmth" in metrics
+    proposal = next(
+        proposal
+        for proposal in result["proposals"]
+        if proposal["evidence"]["aggregates"][0]["metric"] == "relationship_warmth"
+    )
+    patch = proposal["patch"][0]
+    assert patch["op"] == "adjust_trait"
+    assert patch["field"] == "warmth"
+    assert patch["before"] == 0.7
+    assert patch["after"] == pytest.approx(0.75)
+    assert accept(client, proposal["proposal_id"], "warm-take", 0).status_code == 200
+    traits = client.get("/v1/companions/sui/personality").json()["definition"]["traits"]
+    assert traits["warmth"] == pytest.approx(0.75)
+
+
+def test_shared_vocabulary_settles_into_habits(runtime):
+    client, app, _, _, _ = runtime
+    seed_vocabulary(app, "夜航船", 9)
+    result = refresh(client, "vocab-gen").json()
+    proposal = result["proposals"][0]
+    assert proposal["evidence"]["aggregates"][0]["metric"] == "shared_vocabulary"
+    patch = proposal["patch"][0]
+    assert patch["op"] == "add_item"
+    assert patch["field"] == "habits"
+    assert "夜航船" in patch["item"]
+    assert accept(client, proposal["proposal_id"], "vocab-take", 0).status_code == 200
+    habits = client.get("/v1/companions/sui/personality").json()["definition"]["speech_style"][
+        "habits"
+    ]
+    assert any("夜航船" in habit for habit in habits)

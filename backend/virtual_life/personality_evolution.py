@@ -27,6 +27,7 @@ from .personality import (
     _timestamp,
 )
 from .ports import ModelRequest
+from .slow_variables import SlowVariableService
 
 ProposalStatus = Literal["proposed", "accepted", "rejected", "superseded", "expired"]
 Generator = Literal["rules_v1", "model_v1"]
@@ -50,10 +51,16 @@ Metric = Literal[
     "proactive_silent_rate",
     "correction_rate",
     "preference_repeat",
+    "relationship_warmth",
+    "shared_vocabulary",
 ]
 _CANDIDATE_LIMIT = 512
 _GENERATOR_VERSION = "1"
 _MODEL_CONFIDENCE_CAP = 0.7
+_WARMTH_HIGH_THRESHOLD = 0.75
+_WARMTH_LOW_THRESHOLD = 0.25
+_HABIT_MIN_COUNT = 8
+_HABIT_WORD_CHARS = 12
 
 
 class EvolutionPolicy(RequestModel):
@@ -254,6 +261,7 @@ class PersonalityEvolutionService:
         self.personality = personality
         self.emotion = emotion
         self.memory = memory
+        self.slow = SlowVariableService(personality, emotion)
         self.policy = policy or EvolutionPolicy()
         self.provider = provider
         self.model_name = model_name
@@ -626,7 +634,12 @@ class PersonalityEvolutionService:
         skipped: list[dict] = []
         candidates: list[dict] = []
         used_fields: set[str] = set()
-        for builder in (self._quiet_candidate, self._proactive_candidate):
+        for builder in (
+            self._quiet_candidate,
+            self._proactive_candidate,
+            self._warmth_candidate,
+            self._habits_candidate,
+        ):
             candidate, skip = builder(connection, companion_id, definition, now)
             if skip is not None:
                 skipped.append(skip)
@@ -758,6 +771,120 @@ class PersonalityEvolutionService:
                             "value": round(rate, 6),
                             "threshold": self.policy.proactive_silent_rate_threshold,
                             "samples": total,
+                        }
+                    ],
+                },
+            },
+            None,
+        )
+
+    def _warmth_candidate(self, connection, companion_id, definition, now):
+        """Relationship warmth slow variable nudges the warmth trait."""
+        snapshot = self.slow.snapshot(connection, companion_id, now)
+        sample_size = int(snapshot.get("sample_size") or 0)
+        if sample_size < self.policy.min_evidence_items:
+            return None, {"reason": "insufficient_evidence", "metric": "relationship_warmth"}
+        warmth = float(snapshot.get("relationship_warmth") or 0.0)
+        if warmth >= _WARMTH_HIGH_THRESHOLD:
+            direction = 1
+            threshold = _WARMTH_HIGH_THRESHOLD
+        elif warmth <= _WARMTH_LOW_THRESHOLD:
+            direction = -1
+            threshold = _WARMTH_LOW_THRESHOLD
+        else:
+            return None, None
+        before = definition["traits"]["warmth"]
+        step = direction * self.policy.max_trait_step
+        after = round(max(0.0, min(1.0, before + step)), 6)
+        if after == before:
+            return None, {"reason": "field_at_bound", "metric": "relationship_warmth"}
+        rows = self._live_experiences(connection, companion_id, self._window_start(now))
+        aligned = [
+            row
+            for row in rows
+            if direction * float(json.loads(row["appraisal_json"])["delta"]["valence"]) > 0
+        ]
+        if not aligned:
+            return None, {"reason": "insufficient_evidence", "metric": "relationship_warmth"}
+        days = self._window_days()
+        return (
+            {
+                "field": "warmth",
+                "metric": "relationship_warmth",
+                "confidence": round(min(0.9, 0.5 + abs(warmth - 0.5) * 0.4), 6),
+                "rationale": (
+                    f"最近 {days} 天的情感均值显示关系温度为 {warmth:.2f}"
+                    f"（阈值 {threshold:.2f}，样本 {sample_size} 条），"
+                    "温暖特质据此微调。"
+                ),
+                "patch": [
+                    {
+                        "op": "adjust_trait",
+                        "field": "warmth",
+                        "delta": round(after - before, 6),
+                        "before": before,
+                        "after": after,
+                    }
+                ],
+                "evidence": {
+                    "window_days": days,
+                    "sample_size": sample_size,
+                    "event_refs": [row["event_id"] for row in aligned][:16],
+                    "aggregates": [
+                        {
+                            "metric": "relationship_warmth",
+                            "value": round(warmth, 6),
+                            "threshold": threshold,
+                            "samples": sample_size,
+                        }
+                    ],
+                },
+            },
+            None,
+        )
+
+    def _habits_candidate(self, connection, companion_id, definition, now):
+        """High-frequency shared vocabulary settles into speech habits."""
+        try:
+            rows = connection.execute(
+                "SELECT word, count FROM vocabulary WHERE companion_id = ? "
+                "AND count >= ? ORDER BY count DESC, word LIMIT 1",
+                (companion_id, _HABIT_MIN_COUNT),
+            ).fetchall()
+        except Exception:
+            return None, None
+        if not rows:
+            return None, None
+        word = str(rows[0]["word"])
+        count = int(rows[0]["count"])
+        if not word or len(word) > _HABIT_WORD_CHARS:
+            return None, None
+        days = self._window_days()
+        existing = [
+            str(item) for item in (definition.get("speech_style") or {}).get("habits") or []
+        ]
+        item = f"和{word}这个词很熟，聊起来会自然带出"
+        if any(word in line for line in existing):
+            return None, {"reason": "field_at_bound", "metric": "preference_repeat"}
+        return (
+            {
+                "field": "habits",
+                "metric": "shared_vocabulary",
+                "confidence": round(min(0.9, 0.5 + count / 100.0), 6),
+                "rationale": (
+                    f"你们聊天里「{word}」出现了 {count} 次，"
+                    "已经像你们之间的口头语，建议沉淀进说话习惯。"
+                ),
+                "patch": [{"op": "add_item", "field": "habits", "item": item}],
+                "evidence": {
+                    "window_days": days,
+                    "sample_size": count,
+                    "aggregates": [
+                        {
+                            "metric": "shared_vocabulary",
+                            "value": count,
+                            "threshold": _HABIT_MIN_COUNT,
+                            "samples": count,
                         }
                     ],
                 },

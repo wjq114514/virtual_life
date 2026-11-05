@@ -146,7 +146,7 @@ ModelProvider 的单次对话执行已在 [WebUI 阶段](webui.md)接入：使�
 
 人格自然演变以“有来源的提议”实现，稳定核心只能由所有者显式采纳后改写。分层模型、补丁语义、栅栏规则与后续阶段（长期慢变量、模型校准）的完整合同见[人格进化实施合同](personality-evolution-plan.md)。
 
-PersonalityEvolutionService(personality, emotion, memory, policy=None, provider=None, model_name="", token_estimator=None) 导出 list、get、refresh、accept、reject；它复用 PersonalityService 的 personality_commands 幂等、personality_profiles 原子写与 events 事件发布，只新增 personality_evolution_proposals 表。规则生成器 `rules_v1` 完全本地、`model_calls=0`：`quiet_request_rate` 与 `proactive_silent_rate` 超阈值时提议下调 `traits.initiative`（步长与累计漂移受限），`correction_rate` 记为 `calibration_requires_phase_c`，`preference_repeat` 记为 `model_semantics_required`。
+PersonalityEvolutionService(personality, emotion, memory, policy=None, provider=None, model_name="", token_estimator=None) 导出 list、get、refresh、accept、reject；它复用 PersonalityService 的 personality_commands 幂等、personality_profiles 原子写与 events 事件发布，只新增 personality_evolution_proposals 表。规则生成器 `rules_v1` 完全本地、`model_calls=0`：`quiet_request_rate` 与 `proactive_silent_rate` 超阈值时提议下调 `traits.initiative`（步长与累计漂移受限），`correction_rate` 记为 `calibration_requires_phase_c`，`preference_repeat` 记为 `model_semantics_required`；`relationship_warmth` 在慢变量温暖度 ≥0.75/≤0.25 时提议上调/下调 `traits.warmth`（证据为窗口内同向情绪体验与聚合值），`shared_vocabulary` 在共现词 `count≥8` 且不超过 12 字时提议把它沉淀进 `speech_style.habits`。
 
 HTTP 接口（均为所有者配置接口，复用 Bearer 身份，不需要输出租约）：
 

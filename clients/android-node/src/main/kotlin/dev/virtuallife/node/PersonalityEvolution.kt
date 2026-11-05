@@ -34,6 +34,8 @@ enum class EvolutionMetric {
     @SerialName("proactive_silent_rate") PROACTIVE_SILENT_RATE,
     @SerialName("correction_rate") CORRECTION_RATE,
     @SerialName("preference_repeat") PREFERENCE_REPEAT,
+    @SerialName("relationship_warmth") RELATIONSHIP_WARMTH,
+    @SerialName("shared_vocabulary") SHARED_VOCABULARY,
 }
 
 /**
