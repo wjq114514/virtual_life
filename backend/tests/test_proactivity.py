@@ -684,3 +684,74 @@ def test_proactivity_poll_configuration(tmp_path, monkeypatch):
     monkeypatch.setenv("VIRTUAL_LIFE_PROACTIVITY_POLL_SECONDS", "0")
     with pytest.raises(ValueError):
         Settings.load(config)
+
+
+def test_schedule_and_boundary_user_message_carry_context(runtime):
+    """P0-2: schedule/boundary scaffolds carry current context, stay short."""
+    policy(runtime, cooldown_seconds=60, daily_limit=5)  # both origins may dispatch in one test
+    client, app, clock, provider, state = runtime
+    updated = client.post(
+        "/v1/companions/sui/personality/state",
+        json={
+            "command_id": "mood-1",
+            "expected_revision": 0,
+            "state": {"mood": "curious", "energy": 0.4},
+            "ttl_seconds": 86_400,
+        },
+    )
+    assert updated.status_code == 200, updated.text
+    created = clock.value.isoformat()
+    expires = (clock.value + timedelta(hours=24)).isoformat()
+    with app.state.coordinator.store.transaction() as connection:
+        connection.execute(
+            """INSERT INTO inner_activities
+                (activity_id, companion_id, kind, trigger, content, salience, urge,
+                 attention_session_id, attention_boundary_id, context_version,
+                 source_event_id, generator, model_json, thinking, status, created_at, expires_at)
+                VALUES ('ina-context-1', 'sui', 'restless', 'social_need',
+                        '想找你聊两句最近读的东西', 0.4, 0.2, NULL, NULL, 'v1',
+                        NULL, 'rules_v1', NULL, NULL, 'active', ?, ?)""",
+            (created, expires),
+        )
+    captured: list[str] = []
+    dialogue = app.state.dialogue
+    original = dialogue.send_proactive
+
+    def spy(companion_id, payload):
+        captured.append(payload["user_message"])
+        return original(companion_id, payload)
+
+    # Idle gate (_idle_reason) requires a dialogue history and >= min_idle_seconds
+    # since the last user turn, so seed one real turn and advance past the window.
+    talk = client.post(
+        "/v1/companions/sui/dialogue",
+        json={
+            "command_id": "user-talk-1",
+            "node_id": "desk",
+            "epoch": state["epoch"],
+            "expected_revision": state["revision"],
+            "user_message": "刚才在忙，现在告一段落了",
+        },
+    )
+    assert talk.status_code == 200, talk.text
+    clock.value += timedelta(seconds=4_200)
+    dialogue.send_proactive = spy
+    observe(runtime)  # boundary candidate
+    assert app.state.proactivity.process_next()["status"] == "awaiting_generation"
+    app.state.proactivity.schedule("sui", "sched-1", "tool-1", 600, reason="check-in")
+    clock.value += timedelta(seconds=610)
+    observe(runtime, sequence=2, boundary="none", boundary_id=None)
+    result = app.state.proactivity.process_next()
+    assert result["status"] == "awaiting_generation", result
+    assert len(captured) == 2
+    day_parts = ("清晨", "上午", "下午", "傍晚", "晚上", "深夜")
+    for message in captured:
+        assert any(part in message for part in day_parts)
+        assert "好奇" in message
+        assert "想找你聊两句最近读的东西" in message
+        assert len(message) <= 200
+        assert "{" not in message  # context note is prose, never raw JSON
+    assert "宿主报告" in captured[0]  # boundary scaffold retained
+    assert "很久没有和用户交谈" in captured[1]  # schedule scaffold retained
+    # One model call for the seeded user turn; the proactive turns park externally.
+    assert len(provider.requests) == 1

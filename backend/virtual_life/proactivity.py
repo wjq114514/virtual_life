@@ -16,6 +16,8 @@ from .coordinator import DomainError
 from .dialogue import DialogueError
 from .focus import FocusService
 from .models import Identifier
+from .personality import PersonalityError
+from .rhythm import day_part
 
 
 def _json(value):
@@ -28,6 +30,21 @@ def _instant(value):
 
 def _timestamp(value):
     return value.astimezone(UTC).isoformat(timespec="microseconds")
+
+
+_MOOD_LABELS = {
+    "calm": "平静",
+    "cheerful": "愉快",
+    "curious": "好奇",
+    "concerned": "挂心",
+    "tired": "疲惫",
+    "amused": "觉得有趣",
+    "excited": "兴奋",
+    "surprised": "惊讶",
+    "sympathetic": "体恤",
+    "annoyed": "有点烦",
+    "proud": "自豪",
+}
 
 
 class AttentionSample(BaseModel):
@@ -1371,6 +1388,32 @@ class ProactivityService:
                 self._decision(connection, row, "failed", "execution_unknown", now)
                 self._update_task_status(connection, row, "failed", "execution_unknown", now)
 
+    def _context_note(self, companion_id, now):
+        """Short background facts appended to schedule/boundary scaffolds.
+
+        Day part, current mood/energy, and the latest active inner activity are
+        plain local facts (no JSON, no scripted lines) so the fixed scaffold
+        still tells the model what the companion feels right now. The reply
+        itself stays model-generated; prompt-side rhythm/state asides remain
+        the authoritative presence signal, this note only feeds the scaffold.
+        """
+        parts = [f"现在是{day_part(now.astimezone().hour)}"]
+        try:
+            state = self.dialogue.personality_service.get_state(companion_id)["state"]
+            mood = _MOOD_LABELS.get(state.get("mood"), str(state.get("mood") or ""))
+            energy = float(state.get("energy") or 0.5)
+            parts.append(f"你此刻心情{mood}、精力{'充足' if energy >= 0.5 else '偏低'}")
+        except (DomainError, PersonalityError, KeyError, ValueError, TypeError):
+            pass  # state is a courtesy fact, never a gate
+        try:
+            if self.inner_life is not None:
+                activity = self.inner_life.current(companion_id)
+                if activity is not None:
+                    parts.append(f"你最近的一段内在活动：“{activity.content[:60]}”")
+        except (DomainError, PersonalityError, ValueError, TypeError):
+            pass
+        return "（背景：" + "，".join(parts) + "）"
+
     def process_next(self, companion_id=None):
         with self.store.transaction(write=True) as connection:
             now = self.coordinator._now()
@@ -1406,6 +1449,7 @@ class ProactivityService:
             )
             self._decision(connection, row, "running", "eligible", now)
             policy = self._policy(connection, row["companion_id"])["policy"]
+        note = self._context_note(row["companion_id"], now)
         descriptions = {
             "task_completed": "宿主报告用户刚完成一个任务。可以简短陪伴，不推测完成了什么。",
             "break_started": "宿主报告用户开始休息。可以简短陪伴，不评价用户疲劳或工作成效。",
@@ -1447,10 +1491,10 @@ class ProactivityService:
         elif row["origin"] == "schedule":
             user_message = (
                 "你已经很久没有和用户交谈了。现在可以简短主动说一句；"
-                "如果没有自然合适的话题就保持沉默，不要声称知道用户未提供的事情。"
+                "如果没有自然合适的话题就保持沉默，不要声称知道用户未提供的事情。" + note
             )
         else:
-            user_message = descriptions[row["boundary"]]
+            user_message = descriptions[row["boundary"]] + note
         try:
             result = self.dialogue.send_proactive(
                 row["companion_id"],
