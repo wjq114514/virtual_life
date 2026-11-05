@@ -81,6 +81,8 @@ Reason = Literal[
     "explicit_question",
     "quiet_request",
     "model_v1",
+    "proactive_replied",
+    "proactive_unanswered",
 ]
 
 # Reactions whose experiences decay more slowly when negative_half_life_seconds
@@ -262,6 +264,56 @@ class EmotionService:
             (event["event_id"], event["companion_id"], _json(appraisal), _timestamp(now)),
         )
         self._bump(connection, event["companion_id"], event["event_id"], now)
+
+    def proactive_feedback(self, connection, companion_id, event_id, now, *, replied):
+        """Record affect for whether the user answered a proactive message.
+
+        Reaching out is itself an experience with an outcome: a reply is a
+        small joy attributed to the other person, prolonged silence a mild dip
+        attributed to the situation. ``event_id`` is the companion's
+        ``companion.proactive_feedback`` event, so command replays and the
+        timeout scan cannot double-charge the same outreach.
+        """
+        if not self.policy.enabled:
+            return
+        if connection.execute(
+            "SELECT 1 FROM emotion_experiences WHERE event_id=?", (event_id,)
+        ).fetchone():
+            return
+        if replied:
+            reaction, reason, attribution = "joy", "proactive_replied", "other"
+            delta = {
+                "valence": 0.25,
+                "arousal": 0.3,
+                "control": 0.05,
+                "energy": 0.0,
+                "social_battery": 0.02,
+            }
+        else:
+            reaction, reason, attribution = "concern", "proactive_unanswered", "situation"
+            delta = {
+                "valence": -0.12,
+                "arousal": 0.08,
+                "control": 0.0,
+                "energy": 0.0,
+                "social_battery": -0.01,
+            }
+        appraisal = {
+            "reaction": reaction,
+            "reason": reason,
+            "confidence": 0.85,
+            "delta": delta,
+            "appraisal": {"uncertainty": 0.1},
+            "appraisal_version": "proactive_feedback_v1",
+            "uncertainty": 0.1,
+            "attribution": attribution,
+        }
+        connection.execute(
+            """INSERT INTO emotion_experiences
+            (event_id, companion_id, appraisal_json, created_at) VALUES (?, ?, ?, ?)""",
+            (event_id, companion_id, _json(appraisal), _timestamp(now)),
+        )
+        self._bump(connection, companion_id, event_id, now)
 
     _EMOTION_MODEL_PURPOSE = "emotion_appraise"
     _REACTIONS = (

@@ -1418,10 +1418,59 @@ class ProactivityService:
             pass
         return "（背景：" + "，".join(parts) + "）"
 
+    # Outreach older than this without any user reply is closed as unanswered.
+    _NO_REPLY_SECONDS = 2 * 3600
+
+    def _feedback_timeouts(self, connection, now) -> None:
+        """Close the loop on outreach the user never answered.
+
+        A completed proactive message that got no reply within the window
+        gains a ``companion.proactive_feedback`` event (unanswered) and a mild
+        negative emotion experience, so the companion's next urge baseline
+        reflects how its initiative actually landed.
+        """
+        cutoff = _timestamp(now - timedelta(seconds=self._NO_REPLY_SECONDS))
+        rows = connection.execute(
+            """SELECT * FROM events WHERE type='companion.proactive_completed'
+                AND occurred_at <= ? ORDER BY sequence""",
+            (cutoff,),
+        ).fetchall()
+        for row in rows:
+            try:
+                candidate_id = json.loads(row["payload_json"]).get("candidate_id")
+            except ValueError:
+                continue
+            if not candidate_id:
+                continue
+            if connection.execute(
+                """SELECT 1 FROM events WHERE type='companion.proactive_feedback'
+                    AND companion_id=? AND payload_json LIKE ?""",
+                (row["companion_id"], f"%{candidate_id}%"),
+            ).fetchone():
+                continue
+            feedback_event = self.coordinator._emit(
+                connection,
+                now,
+                "companion.proactive_feedback",
+                {"candidate_id": candidate_id, "replied": False},
+                companion_id=row["companion_id"],
+                node_id=row["node_id"],
+            )
+            emotion = self.dialogue.emotion_service
+            if emotion is not None:
+                emotion.proactive_feedback(
+                    connection,
+                    row["companion_id"],
+                    feedback_event["event_id"],
+                    now,
+                    replied=False,
+                )
+
     def process_next(self, companion_id=None):
         with self.store.transaction(write=True) as connection:
             now = self.coordinator._now()
             self._recover(connection, now)
+            self._feedback_timeouts(connection, now)
             self._enqueue_tasks(connection, now)
             self._enqueue_scheduled(connection, now)
             self._enqueue_inner(connection, now)

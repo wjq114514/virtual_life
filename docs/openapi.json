@@ -8497,7 +8497,9 @@
               "explicit_distress",
               "explicit_question",
               "quiet_request",
-              "model_v1"
+              "model_v1",
+              "proactive_replied",
+              "proactive_unanswered"
             ],
             "title": "Reason"
           },

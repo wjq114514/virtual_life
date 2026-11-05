@@ -596,6 +596,59 @@ class DialogueService:
         with self.memory_service.logs.correlate(command_id=payload.get("command_id")):
             return self._send(companion_id, payload, proactive=True)
 
+    # A user message within this window after a proactive message counts as an
+    # answer to that outreach. Module constant (rhythm-style): no new config
+    # surface, so settings/docs/example stay untouched.
+    _PROACTIVE_REPLY_WINDOW_SECONDS = 6 * 3600
+
+    def _proactive_reply_feedback(self, connection, companion_id: str, now: datetime) -> None:
+        """Close the feedback loop when the user answers a proactive message.
+
+        The latest completed proactive outreach within the reply window gains
+        a ``companion.proactive_feedback`` event (replied) and a small positive
+        emotion experience, so the next urge baseline is not blind to whether
+        reaching out actually worked. Failures never fail the dialogue turn.
+        """
+        try:
+            row = connection.execute(
+                """SELECT payload_json, occurred_at FROM events
+                    WHERE type='companion.proactive_completed' AND companion_id=?
+                    ORDER BY sequence DESC LIMIT 1""",
+                (companion_id,),
+            ).fetchone()
+            if row is None:
+                return
+            candidate_id = json.loads(row["payload_json"]).get("candidate_id")
+            if not candidate_id:
+                return
+            sent_at = datetime.fromisoformat(row["occurred_at"].replace("Z", "+00:00"))
+            latency = (now - sent_at).total_seconds()
+            if latency < 0 or latency > self._PROACTIVE_REPLY_WINDOW_SECONDS:
+                return
+            if connection.execute(
+                """SELECT 1 FROM events WHERE type='companion.proactive_feedback'
+                    AND companion_id=? AND payload_json LIKE ?""",
+                (companion_id, f"%{candidate_id}%"),
+            ).fetchone():
+                return
+            feedback_event = self.coordinator._emit(
+                connection,
+                now,
+                "companion.proactive_feedback",
+                {
+                    "candidate_id": candidate_id,
+                    "replied": True,
+                    "latency_seconds": int(max(0, latency)),
+                },
+                companion_id=companion_id,
+            )
+            if self.emotion_service is not None:
+                self.emotion_service.proactive_feedback(
+                    connection, companion_id, feedback_event["event_id"], now, replied=True
+                )
+        except Exception:  # noqa: BLE001 - diagnostics only, never gate the turn
+            logger.exception("proactive reply feedback failed companion_id=%s", companion_id)
+
     def send_voice(
         self,
         companion_id: str,
@@ -1475,6 +1528,10 @@ class DialogueService:
                         result.assistant_message,
                         now,
                     )
+                    # Outreach feedback lands only after every gate of this
+                    # turn passed, so its emotion write can never invalidate
+                    # the turn it is crediting.
+                    self._proactive_reply_feedback(connection, companion_id, now)
                 if self.automatic_memory is not None and not proactive:
                     self.automatic_memory.enqueue(connection, event)
             else:
