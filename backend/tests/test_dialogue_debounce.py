@@ -6,6 +6,9 @@ discard_reason="debounced" and never dispatches a provider call. The first
 message in the window replies normally; later messages are acknowledged silently.
 """
 
+import threading
+import time
+
 from fastapi.testclient import TestClient
 from test_api import attach_desktop
 from virtual_life.api import create_app
@@ -123,3 +126,178 @@ def test_reply_after_window_elapsed_uses_latest_accepted_time(tmp_path):
         # was absorbed and one that completed.
         history = client.get("/v1/companions/sui/dialogue/history").json()
         assert history["items"]
+
+
+class RecordingProvider(CountingProvider):
+    """Records the full prompt text of every provider call."""
+
+    def __init__(self):
+        super().__init__()
+        self.prompts: list[str] = []
+
+    def complete(self, request):
+        self.prompts.append(request.context_text)
+        return super().complete(request)
+
+
+def _build_recording(tmp_path, debounce, batch):
+    provider = RecordingProvider()
+    settings = Settings(
+        database_path=str(tmp_path / "batch.sqlite"),
+        api_token="test-token",
+        model_base_url="http://model.invalid",
+        model_name="fake",
+        dialogue_debounce_seconds=debounce,
+        dialogue_batch_seconds=batch,
+    )
+    app = create_app(settings, model_provider=provider)
+    return settings, provider, app
+
+
+def test_batching_merges_burst_into_one_model_call(tmp_path):
+    """A follow-up sent inside the batch window merges into the waiting turn.
+
+    The first message waits for user silence (batch_seconds) before preview;
+    the follow-up is claimed during that wait (its own event is emitted), then
+    absorbed by the debounce window and merged into the single preview/model
+    call — one provider call answers the whole burst.
+    """
+    _settings, provider, app = _build_recording(tmp_path, debounce=30.0, batch=0.4)
+    with TestClient(app, headers={"Authorization": "Bearer test-token"}) as client:
+        state = attach_desktop(client)
+        import threading
+
+        results = {}
+
+        def first_turn():
+            results["first"] = send(client, state, "t1", "我周末想去爬山")
+
+        worker = threading.Thread(target=first_turn)
+        worker.start()
+        # The first turn is now inside its quiet window; send the follow-up.
+        import time as _time
+
+        _time.sleep(0.1)
+        results["second"] = send(client, state, "t2", "带上相机吧")
+        worker.join(timeout=15)
+        assert results["first"].status_code == 200, results["first"].text
+        assert results["first"].json()["status"] == "completed"
+        assert results["second"].status_code == 200, results["second"].text
+        assert results["second"].json()["status"] == "silent"
+        assert results["second"].json()["discard_reason"] == "debounced"
+        assert provider.calls == 1
+        # The merged prompt carries both burst texts as one user message.
+        merged_prompt = provider.prompts[0]
+        assert "我周末想去爬山" in merged_prompt
+        assert "带上相机吧" in merged_prompt
+
+
+def test_batching_disabled_keeps_followup_unmerged(tmp_path):
+    """With batch_seconds=0 the follow-up is still absorbed but never merged."""
+    _settings, provider, app = _build_recording(tmp_path, debounce=30.0, batch=0.0)
+    with TestClient(app, headers={"Authorization": "Bearer test-token"}) as client:
+        state = attach_desktop(client)
+        first = send(client, state, "t1", "我周末想去爬山")
+        second = send(client, state, "t2", "带上相机吧")
+        assert first.json()["status"] == "completed"
+        assert second.json()["status"] == "silent"
+        assert provider.calls == 1
+        assert "带上相机吧" not in provider.prompts[0]
+
+
+def _build_pre_dispatch(tmp_path):
+    provider = RecordingProvider()
+    settings = Settings(
+        database_path=str(tmp_path / "pre-dispatch.sqlite"),
+        api_token="test-token",
+        model_base_url="http://model.invalid",
+        model_name="fake",
+    )
+    app = create_app(settings, model_provider=provider)
+    return settings, provider, app
+
+
+def test_superseded_turn_dropped_before_model_call(tmp_path):
+    """A newer claimed user turn discards the older one before the provider runs.
+
+    The first turn is parked between preview and the dispatch gate (simulated by
+    slowing the model-token reservation). While it waits, a second message is
+    claimed and answered. The first turn's pre-dispatch gate then sees the newer
+    ``companion.dialogue_received`` event and fails with 409
+    ``dialogue_context_changed`` WITHOUT dispatching the provider for it.
+    """
+    _settings, provider, app = _build_pre_dispatch(tmp_path)
+    memory = app.state.memory
+    original_reserve = memory.reserve_model_tokens
+    state_resumed = {"done": False}
+
+    def slow_reserve(companion_id, payload):
+        if not state_resumed["done"]:
+            state_resumed["done"] = True
+            time.sleep(0.25)
+        return original_reserve(companion_id, payload)
+
+    memory.reserve_model_tokens = slow_reserve
+    with TestClient(app, headers={"Authorization": "Bearer test-token"}) as client:
+        state = attach_desktop(client)
+        results = {}
+
+        def first_turn():
+            results["first"] = send(client, state, "t1", "我周末想去爬山")
+
+        worker = threading.Thread(target=first_turn)
+        worker.start()
+        time.sleep(0.05)
+        # The newer turn claims and completes while the old one is parked.
+        results["second"] = send(client, state, "t2", "带上相机吧")
+        worker.join(timeout=15)
+        first = results["first"]
+        second = results["second"]
+        assert second.status_code == 200, second.text
+        assert second.json()["status"] == "completed"
+        # The superseded turn never reaches the provider and fails cleanly.
+        assert first.status_code == 409, first.text
+        assert first.json()["error"]["code"] == "dialogue_context_changed"
+        # Exactly one model call: the newer turn's, never the discarded one.
+        assert provider.calls == 1
+
+
+def test_superseded_turn_replays_stored_error_idempotently(tmp_path):
+    """Replaying the superseded command returns the stored error, not a rerun.
+
+    The failed receipt is durable: a same-payload POST replays the 409 without
+    claiming a new turn or spending another provider call, preserving the
+    idempotent-replay semantics of the pre-dispatch gate.
+    """
+    _settings, provider, app = _build_pre_dispatch(tmp_path)
+    memory = app.state.memory
+    original_reserve = memory.reserve_model_tokens
+    state_resumed = {"done": False}
+
+    def slow_reserve(companion_id, payload):
+        if not state_resumed["done"]:
+            state_resumed["done"] = True
+            time.sleep(0.25)
+        return original_reserve(companion_id, payload)
+
+    memory.reserve_model_tokens = slow_reserve
+    with TestClient(app, headers={"Authorization": "Bearer test-token"}) as client:
+        state = attach_desktop(client)
+        results = {}
+
+        def first_turn():
+            results["first"] = send(client, state, "t1", "我周末想去爬山")
+
+        worker = threading.Thread(target=first_turn)
+        worker.start()
+        time.sleep(0.05)
+        results["second"] = send(client, state, "t2", "带上相机吧")
+        worker.join(timeout=15)
+        assert results["first"].status_code == 409
+        assert results["second"].json()["status"] == "completed"
+        assert provider.calls == 1
+        # Idempotent replay of the failed command: same stored 409, no rerun.
+        replay = send(client, state, "t1", "我周末想去爬山")
+        assert replay.status_code == 409, replay.text
+        assert replay.json()["error"]["code"] == "dialogue_context_changed"
+        assert provider.calls == 1

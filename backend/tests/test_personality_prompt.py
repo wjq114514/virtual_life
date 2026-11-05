@@ -97,3 +97,86 @@ def test_all_sections_included_in_seCTIONS():
         "history",
     }
     assert set(_SECTIONS) == expected
+
+
+def test_sample_habits_bounded_and_deterministic():
+    """Habits sampling returns a bounded, order-preserving, seeded subset."""
+    from virtual_life.personality_prompt import _sample_habits
+
+    habits = [f"习惯{i}" for i in range(6)]
+    picked = _sample_habits(habits, "seed-a")
+    assert 1 <= len(picked) <= 3
+    assert set(picked) <= set(habits)
+    assert len(set(picked)) == len(picked)
+    # Same seed is stable within a turn (preview is called up to three times).
+    assert _sample_habits(habits, "seed-a") == picked
+    # Different seeds sample different subsets across turns.
+    variants = {tuple(_sample_habits(habits, s)) for s in ("seed-b", "seed-c", "seed-d")}
+    assert len(variants) > 1
+
+
+def test_sample_habits_keeps_small_pools_whole():
+    """Small habit pools are never cut down by sampling."""
+    from virtual_life.personality_prompt import _sample_habits
+
+    habits = ["口头禅A", "口头禅B"]
+    assert _sample_habits(habits, "any") == habits
+    single = ["唯一习惯"]
+    assert _sample_habits(single, "any") == single
+
+
+def test_dedupe_recall_items_keeps_newest_revision():
+    """Recalled items with the same content collapse to the newest revision."""
+    from virtual_life.personality_prompt import _dedupe_recall_items
+
+    items = [
+        {"content": "一起去过海边的咖啡店", "revision": 1, "semantic_key": "k1"},
+        {"content": "一起去过海边的咖啡店", "revision": 3, "semantic_key": "k1"},
+        {"content": "完全不同的记忆", "revision": 2, "semantic_key": None},
+    ]
+    deduped = _dedupe_recall_items(items)
+    assert len(deduped) == 2
+    kept = next(i for i in deduped if i["revision"] != 2)
+    assert kept["revision"] == 3
+
+
+def test_dedupe_recall_items_merges_near_identical_text():
+    """Near-identical episode texts (prefix window) collapse even without keys."""
+    from virtual_life.personality_prompt import _dedupe_recall_items
+
+    base = "用户上周说想去爬山，还想带上相机，说山顶拍照很好看"
+    items = [
+        {"content": base, "revision": 2, "semantic_key": None},
+        {"content": base + "。", "revision": 1, "semantic_key": None},
+    ]
+    deduped = _dedupe_recall_items(items)
+    assert len(deduped) == 1
+    assert deduped[0]["revision"] == 2
+
+
+def test_attention_drift_and_tone_variant_are_lightweight_asides():
+    """Drift is a plain natural-language line; tone variant is probabilistic."""
+    from virtual_life.personality_prompt import _attention_drift, _tone_variant
+
+    drift = _attention_drift("focus", "calm", 0.2, 0.3, 0.7)
+    assert isinstance(drift, str) and drift.strip()
+    assert "{" not in drift and "}" not in drift  # no JSON data block
+    # Deterministic per (companion, revision, message) — stable within a turn.
+    first = _tone_variant("c1", 4, "在吗")
+    again = _tone_variant("c1", 4, "在吗")
+    assert first == again
+
+
+def test_core_instructions_forbid_invented_nicknames():
+    """Core instructions must ban invented nicknames or forms of address.
+
+    Guards the "晚安，阿宅" failure: the model may only use a name the user
+    themselves stated or sourced memory evidence provides, otherwise no name.
+    """
+    from virtual_life.personality_prompt import _CORE_INSTRUCTIONS
+
+    lowered = _CORE_INSTRUCTIONS.lower()
+    assert "nickname" in lowered
+    assert "never invent" in lowered
+    assert "sourced evidence" in lowered
+    assert "without any name" in lowered

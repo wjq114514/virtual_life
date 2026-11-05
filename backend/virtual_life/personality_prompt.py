@@ -5,8 +5,14 @@ It never reserves tokens, changes memories or leases, or invokes a provider.
 Every budget check estimates the complete proposed text, including its labels.
 """
 
+import difflib
+import hashlib
 import json
+import math
+import random
 import re
+import time
+from datetime import datetime, timezone
 from typing import Annotated, Any, Literal, TypeVar
 
 from pydantic import (
@@ -25,7 +31,10 @@ from .memory import MemoryError, MemoryService
 from .models import DisplayName, Identifier, InteractionMode, JsonObject, bounded_json
 from .personality import PersonalityDefinition, PersonalityError, PersonalityState
 from .ports import TokenEstimator
+from .rhythm import rhythm_snapshot
 from .slow_variables import SlowVariableSnapshot
+from .vocabulary import sample_words
+from .vocabulary import vocabulary_aside as vocabulary_aside_text
 
 _Version = Annotated[int, Field(strict=True, ge=0, le=2**63 - 1)]
 _Model = TypeVar("_Model", bound=BaseModel)
@@ -73,7 +82,15 @@ _CORE_INSTRUCTIONS = (
     "to hit the stated value or exaggerate one dimension into a caricature. "
     "Write like a person having a conversation — allow pauses, small hesitations, "
     "and imperfect wording; a reply that reads perfectly polished reads as a bot. "
-    "Output can still be revoked at commit time."
+    "Keep replies short and conversational: the given max_reply_sentences is a soft "
+    "ceiling, not a quota — a natural reply may be one sentence or a couple of short "
+    "clauses, and it is fine to answer the felt intent first before any detail. "
+    "Let the reply breathe: a little hesitation, a fill word, or a lighter follow-up "
+    "reads more human than a perfectly formed paragraph. "
+    "Never invent or use a nickname, pet name, or form of address for the user: "
+    "only call them by a name or nickname the user themselves stated in this "
+    "conversation or that appears as sourced evidence in the memory data block; "
+    "otherwise address them without any name at all."
 )
 _PRESENCE = {
     "calm": "quiet",
@@ -117,6 +134,209 @@ _EMOTION_VERBOSITY = {
     "sympathetic": -1,
     "annoyed": -1,
 }
+
+# Numeric trait anchors are opaque to a small model. Turn each 0..1 value into a
+# human-readable gloss (which *band* it sits in) so the model reads a personality
+# description instead of a bare JSON number. Values are tendencies, not absolutes.
+_TRAIT_GLOSSES: dict[str, tuple[str, str]] = {
+    # key: (high description, low description) — band wording interpolated below
+    "warmth": ("温暖、愿意靠近、会为对方着想", "偏冷淡、保持距离、不太主动表达关心"),
+    "curiosity": ("好奇、爱问、对新鲜事感兴趣", "沉稳、不好奇、不太主动探究"),
+    "assertiveness": ("有主见、会表达自己的判断", "随和、更多顺着对方、较少坚持己见"),
+    "playfulness": ("爱开玩笑、轻松俏皮", "正经、较少打趣"),
+    "initiative": ("主动、会自己开启话题或行动", "被动、更多等对方先开口"),
+}
+
+
+def _TRAIT_HUMAN_GLOSS(traits: dict) -> str:
+    """Return a compact Chinese sentence glossing the numeric trait block."""
+    parts: list[str] = []
+    for key, (high, low) in _TRAIT_GLOSSES.items():
+        value = traits.get(key)
+        if value is None:
+            continue
+        if value >= 0.7:
+            band = "很明显，" + high
+        elif value >= 0.4:
+            band = "有一点，" + high.split("、")[0]
+        else:
+            band = "不太明显，" + low.split("、")[0]
+        parts.append(f"{key}={value:.2f}（{band}）")
+    return "；".join(parts)
+
+
+# ---------------------------------------------------------------------------
+# Attention drift (MaiBot maisaka/attention_drift port, prompt-level only).
+#
+# Three independent dimensions, each in four/three/three bands:
+#   drift_level   subtle / active / scattered / wild — how far attention may
+#                 wander this turn
+#   anchor_policy strict / balanced / loose — how quickly the reply returns to
+#                 the user's actual question after a tangent
+#   reaction_style reserved / natural / lively — how the reply first catches
+#                 the topic (short ack, filler word, quip)
+#
+# Mapping uses only locally available signals:
+#   arousal (emotion state), playfulness / assertiveness (traits),
+#   interaction_mode. Low arousal + focus → strong anchoring; high arousal →
+#   higher drift. The output is plain natural language, not a JSON block, so a
+#   small model reads it as an internal style reference. It explicitly forbids
+#   medicalizing the behaviour (no self-labels like "I'm distracted").
+_DRIFT_LEVELS: dict[str, str] = {
+    "subtle": "只在话题里有自然触发点时，轻轻联想到一句相关的事，不展开",
+    "active": "可以顺着聊到的词自然岔开一句联想，但话题主线还在",
+    "scattered": "可能被消息里最有趣的细节勾走一下，出现短促的插话或半路拐弯，但一轮最多明显跳一次，且不能无视明确的提问",
+    "wild": "容易接错重点、反问或跳到刚才闪过的念头，但要让对方看得出你在回应哪句话",
+}
+_DRIFT_ORDER = ("subtle", "active", "scattered", "wild")
+_ANCHOR_POLICIES: dict[str, str] = {
+    "strict": "联想后立刻回到对方的问题上",
+    "balanced": "岔开一两句后自然收回主题",
+    "loose": "允许绕一小圈再回到正题",
+}
+_REACTION_STYLES: dict[str, str] = {
+    "reserved": "先用很短的一句接住，再继续",
+    "natural": "先用自然的短句或语气词接住话题",
+    "lively": "可以先用吐槽或语气词起手，再接着说",
+}
+
+
+def _attention_drift(
+    interaction_mode: str, mood: str, arousal: float, playfulness: float, assertiveness: float
+) -> str:
+    """One plain-language sentence describing this turn's attention drift."""
+    # Drift level: playfulness is the baseline wander; arousal bumps it up.
+    if playfulness < 0.4:
+        level = "subtle"
+    elif playfulness < 0.7:
+        level = "active"
+    else:
+        level = "scattered"
+    if arousal > 0.7:
+        level = _DRIFT_ORDER[min(_DRIFT_ORDER.index(level) + 1, len(_DRIFT_ORDER) - 1)]
+    if interaction_mode == "focus":
+        # Focus mode caps wandering regardless of arousal.
+        level = "subtle" if arousal < 0.5 else "active"
+    # Anchor policy: assertive companions snap back to the question; focus mode
+    # always anchors strictly.
+    if interaction_mode == "focus" or assertiveness >= 0.65:
+        anchor = "strict"
+    elif assertiveness >= 0.4:
+        anchor = "balanced"
+    else:
+        anchor = "loose"
+    # Reaction style: high arousal + upbeat mood → lively; low arousal or a
+    # subdued mood → reserved.
+    if arousal > 0.6 and mood in ("cheerful", "amused", "excited", "surprised"):
+        reaction = "lively"
+    elif arousal < 0.3 or mood in ("tired", "concerned", "sympathetic"):
+        reaction = "reserved"
+    else:
+        reaction = "natural"
+    return (
+        "（内在参考，仅描述本轮风格：注意力此刻"
+        f"{_DRIFT_LEVELS[level]}；{_ANCHOR_POLICIES[anchor]}；接话时{_REACTION_STYLES[reaction]}。"
+        "不要自称分心或注意力有问题，也不要为了显得分心而降低回应质量。）"
+    )
+
+
+# One-shot tone variants (MaiBot multiple_reply_style port): with a small
+# probability the participation tone gets a single-turn overlay ("today the
+# companion feels a bit playful/wistful"). The seed is companion_id +
+# personality revision + the user message, so the same turn always resolves to
+# the same choice while consecutive turns vary.
+_TONE_VARIANT_TEXT: dict[str, str] = {
+    "playful": "俏皮、随性一些",
+    "wistful": "带一点点若有所思、微微怀旧",
+    "curious": "多一点追问和好奇",
+    "terse": "话更少、更干脆",
+}
+_TONE_VARIANT_PROBABILITY = 12  # percent, i.e. ~10-15% band
+
+
+def _tone_variant(companion_id: str, personality_revision: int, user_message: str) -> str | None:
+    digest = hashlib.sha256(
+        f"{companion_id}:{personality_revision}:{user_message}".encode("utf-8")
+    ).hexdigest()
+    roll = int(digest[:8], 16) % 100
+    if roll >= _TONE_VARIANT_PROBABILITY:
+        return None
+    variants = list(_TONE_VARIANT_TEXT)
+    pick = variants[int(digest[8:16], 16) % len(variants)]
+    return (
+        f"（仅本轮一次性语气提示：{_TONE_VARIANT_TEXT[pick]}；"
+        "只影响这一轮，下一轮回到平时的语气。）"
+    )
+
+
+# Weighted habits sampling (MaiBot expression weighted_sampling port). Habits
+# have no timestamps in the wire schema, so the time-decay weight is applied by
+# list position (append order treated as oldest → newest, half-life of 4 slots)
+# and the RNG is seeded per turn (companion_id + revision + user message): the
+# same turn is stable, consecutive turns sample different subsets.
+_HABIT_HALF_LIFE = 4.0
+
+
+def _sample_habits(habits: list[str], seed: str, *, max_items: int = 3) -> list[str]:
+    if len(habits) <= max_items:
+        return list(habits)
+    rng = random.Random(seed)
+    weights = [
+        math.exp(-(len(habits) - 1 - index) / _HABIT_HALF_LIFE) for index in range(len(habits))
+    ]
+    # Gumbel-top trick: weighted sampling without replacement.
+    keys = sorted(
+        range(len(habits)),
+        key=lambda index: -math.log(rng.random() or 1e-12) / weights[index],
+    )
+    return [habits[index] for index in keys[:max_items]]
+
+
+# ---------------------------------------------------------------------------
+# Recall dedup, throttling and one-shot wording (MaiBot heuristic_injector +
+# post_processor port). MEMORY_DATA was repeatedly injecting the same episode
+# text several times; these helpers collapse duplicates before selection.
+_RECALL_THROTTLE_SECONDS = 4.0
+_SIMILAR_THRESHOLD = 0.85
+_SIMILAR_WINDOW = 80
+
+
+def _dedupe_recall_items(items: list[dict]) -> list[dict]:
+    """Collapse recalled records: same semantic_key/normalized content keeps the
+    highest revision; near-duplicates (difflib ratio over an 80-char window)
+    drop the older entry."""
+    by_key: dict[str, dict] = {}
+    for item in items:
+        semantic_key = item.get("semantic_key")
+        key = (
+            f"sk:{semantic_key}"
+            if semantic_key
+            else "c:" + re.sub(r"\s+", "", item.get("content", ""))[:_SIMILAR_WINDOW]
+        )
+        current = by_key.get(key)
+        if current is None or item.get("revision", 0) > current.get("revision", 0):
+            by_key[key] = item
+    deduped: list[dict] = []
+    for item in by_key.values():
+        content = re.sub(r"\s+", "", item.get("content", ""))[:_SIMILAR_WINDOW]
+        for kept in deduped:
+            kept_content = re.sub(r"\s+", "", kept.get("content", ""))[:_SIMILAR_WINDOW]
+            if difflib.SequenceMatcher(None, content, kept_content).ratio() >= _SIMILAR_THRESHOLD:
+                break
+        else:
+            deduped.append(item)
+    return deduped
+
+
+def _memory_block(items: list[dict]) -> str:
+    """MEMORY_DATA with an explicit one-shot reference note.
+
+    The note tells the model these memories are a single-turn reference: never
+    cite memory IDs and never recite the stored text verbatim, so recalled
+    episodes do not leak into later turns.
+    """
+    note = "（以下记忆只是本轮的一次性参考：不要在回复中引用记忆ID，也不要照抄或复述记忆原文。）"
+    return note + "\n" + _data_block("MEMORY_DATA", items)
 
 
 class _PreviewHistoryMessage(BaseModel):
@@ -307,8 +527,13 @@ class PersonalityPromptBuilder:
         memory_service: MemoryService,
         policy: PersonalityPolicy | dict | None = None,
         token_estimator: TokenEstimator | None = None,
+        vocabulary=None,
+        rhythm_enabled: bool = False,
+        rhythm_timezone: str = "Asia/Shanghai",
     ) -> None:
         self.memory_service = memory_service
+        self.rhythm_enabled = rhythm_enabled
+        self.rhythm_timezone = rhythm_timezone
         self.policy = (
             policy
             if isinstance(policy, PersonalityPolicy)
@@ -317,6 +542,14 @@ class PersonalityPromptBuilder:
         self.token_estimator = (
             memory_service.token_estimator if token_estimator is None else token_estimator
         )
+        # Recall throttle state: (companion_id, correlation command) →
+        # (query, expiry_monotonic, result). Bounded by the companion count
+        # under normal dialogue use; each entry is replaced, never grown.
+        self._recall_cache: dict[tuple[str, str | None], tuple[str, float, dict]] = {}
+        # Optional vocabulary bank (MaiBot jargon_miner port): counts the
+        # user's high-frequency words and injects a seeded 2-3 word sample as
+        # a natural-language aside, exactly like the habits sampling above.
+        self.vocabulary = vocabulary
 
     @staticmethod
     def _validate(model: type[_Model], payload: Any, label: str) -> _Model:
@@ -348,6 +581,15 @@ class PersonalityPromptBuilder:
         slow_variables: SlowVariableSnapshot | None = None,
     ) -> ParticipationPreview:
         presence = _PRESENCE[state.state.mood] if output_permitted else "none"
+        # A user-initiated message is a direct invitation, not background noise:
+        # the companion is present and engaged, so "quiet" would read as cold
+        # indifference. Presence tracks the user's initiative first, then mood.
+        if request.user_initiated and output_permitted and companion.interaction_mode != "away":
+            presence = (
+                "attentive"
+                if state.state.mood not in ("tired", "annoyed")
+                else _PRESENCE[state.state.mood]
+            )
         if not output_permitted:
             reason = "output_not_permitted"
         elif companion.interaction_mode == "away":
@@ -371,7 +613,15 @@ class PersonalityPromptBuilder:
         # explicit focus/quiet caps below still win over any engagement boost.
         if slow_variables is not None and slow_variables.enabled:
             engagement = slow_variables.engagement
-            sentences = min(8, max(1, round(sentences * (0.5 + engagement))))
+            # Probabilistic rounding: a fractional ceiling (e.g. 2.29) should not
+            # always collapse to 2 — it occasionally breathes up to 3, so replies
+            # do not feel metronomic. Deterministic on companion_id for stability.
+            scaled = sentences * (0.5 + engagement)
+            base = int(scaled)
+            frac = scaled - base
+            seed = sum(getattr(companion, "companion_id", str(companion)).encode("utf-8"))
+            sentences = base + (1 if (seed % 1000) / 1000 < frac else 0)
+            sentences = min(8, max(1, sentences))
         # Effective mood (already substituted from emotion in preview) shapes the
         # reply's tone and verbosity. These are additive hints, never absolute.
         mood = state.state.mood
@@ -488,6 +738,23 @@ class PersonalityPromptBuilder:
             "scenario",
         ):
             identity[key] = definition[key]
+        # Humanize the numeric trait block so a 35B model reads *personality*,
+        # not an opaque 0..1 JSON. Bare numbers are meaningless as style anchors.
+        traits = definition.get("traits") or {}
+        identity["traits_human"] = _TRAIT_HUMAN_GLOSS(traits)
+        # Weighted habits sampling: with a large habit pool only a seeded 2-3
+        # item subset is injected per turn (stable within a turn, varying
+        # across turns) instead of the constant full list.
+        speech_style = dict(definition.get("speech_style") or {})
+        habits = speech_style.get("habits") or []
+        if habits:
+            habit_seed = hashlib.sha256(
+                f"{companion.companion_id}:{personality.revision}:{request.user_message}".encode(
+                    "utf-8"
+                )
+            ).hexdigest()
+            speech_style["habits"] = _sample_habits(habits, habit_seed)
+        identity["speech_style"] = speech_style
         core = _CORE_INSTRUCTIONS + "\n\n" + _data_block("PERSONALITY_DATA", identity)
         core_tokens = self._estimate(core)
         if core_tokens > self.policy.max_personality_tokens:
@@ -514,6 +781,49 @@ class PersonalityPromptBuilder:
                 "participation": participation.model_dump(mode="json"),
             },
         )
+        # Attention drift and the one-shot tone variant are lightweight natural
+        # language asides (no JSON block) appended right after the state block.
+        emotion_state = state.emotion.state if state.emotion is not None else None
+        arousal = float(getattr(emotion_state, "arousal", 0.5) or 0.5)
+        # Vocabulary aside (MaiBot jargon_miner port): the user's own
+        # high-frequency words, sampled weighted and seeded per turn so the
+        # same rebuild is stable. Words are a reference for natural usage,
+        # never a mandated reply vocabulary.
+        vocabulary_aside = None
+        if self.vocabulary is not None:
+            try:
+                words = sample_words(
+                    self.vocabulary.eligible_words(companion.companion_id),
+                    "vocab:"
+                    + hashlib.sha256(
+                        f"{companion.companion_id}:{personality.revision}"
+                        f":{request.user_message}".encode("utf-8")
+                    ).hexdigest(),
+                )
+                vocabulary_aside = vocabulary_aside_text(words)
+            except Exception:
+                vocabulary_aside = None  # statistics must never break a turn
+        # Local-time rhythm aside: a plain time fact ("现在是深夜（02:14）")
+        # beside the state block, so the model can naturally react to the
+        # hour. Facts only — no scripted lines about what to say.
+        rhythm_aside = None
+        if self.rhythm_enabled:
+            snapshot = rhythm_snapshot(datetime.now(timezone.utc), self.rhythm_timezone)
+            if snapshot is not None:
+                rhythm_aside = snapshot["label"]
+        asides = [
+            _attention_drift(
+                companion.interaction_mode,
+                state.state.mood,
+                arousal,
+                traits.get("playfulness", 0.5),
+                traits.get("assertiveness", 0.5),
+            ),
+            _tone_variant(companion.companion_id, personality.revision, request.user_message),
+            rhythm_aside,
+            vocabulary_aside,
+        ]
+        current += "\n" + "\n".join(aside for aside in asides if aside)
         message = _data_block(
             "CURRENT_USER_MESSAGE_DATA" if request.user_initiated else "PROACTIVE_CONTEXT_DATA",
             {"role": "user", "name": request.user_name, "content": request.user_message}
@@ -561,17 +871,43 @@ class PersonalityPromptBuilder:
 
         # Only the recall query is shortened. The mandatory message above remains
         # complete; MemoryRecall intentionally limits its query to 2048 characters.
-        try:
-            recalled = self.memory_service.recall(
-                companion.companion_id,
-                {
-                    "query": request.user_message[:2048],
-                    "token_budget": request.memory_token_budget,
-                    "max_items": request.max_memory_items,
-                },
+        # Throttle: an identical query re-previewed within the short window (the
+        # dialogue path legitimately re-previews up to three times per turn)
+        # reuses the cached recall result instead of re-querying, and the cached
+        # items are deduplicated (same content/semantic_key keeps the newest
+        # revision) so MEMORY_DATA stops carrying repeated episode text.
+        # The cache is keyed by the correlation command id as well, so a result
+        # cached for one dialogue command (or an uncorrelated preview request)
+        # is never reused by a different command on the same query.
+        recall_command = (
+            self.memory_service.logs.current_command_id()
+            if self.memory_service is not None and self.memory_service.logs is not None
+            else None
+        )
+        cache_key = (companion.companion_id, recall_command)
+        recall_query = request.user_message[:2048]
+        cached = self._recall_cache.get(cache_key)
+        if cached is not None and cached[0] == recall_query and time.monotonic() < cached[1]:
+            recalled = cached[2]
+        else:
+            try:
+                recalled = self.memory_service.recall(
+                    companion.companion_id,
+                    {
+                        "query": recall_query,
+                        "token_budget": request.memory_token_budget,
+                        "max_items": request.max_memory_items,
+                    },
+                )
+            except MemoryError as exc:
+                raise PersonalityError(exc.status_code, exc.code, exc.message) from exc
+            recalled = dict(recalled)
+            recalled["items"] = _dedupe_recall_items(recalled.get("items", []))
+            self._recall_cache[cache_key] = (
+                recall_query,
+                time.monotonic() + _RECALL_THROTTLE_SECONDS,
+                recalled,
             )
-        except MemoryError as exc:
-            raise PersonalityError(exc.status_code, exc.code, exc.message) from exc
         selected_memories: list[dict] = []
         selected_versions: dict[str, int] = {}
         selected_entity_versions: dict[str, int] = {}
@@ -625,7 +961,7 @@ class PersonalityPromptBuilder:
                 if kind == "relation":
                     sourced_item["entity_versions"] = item.get("entity_versions", [])
                 proposal = selected_memories + [sourced_item]
-                memory_text = _data_block("MEMORY_DATA", proposal)
+                memory_text = _memory_block(proposal)
                 if self._estimate(memory_text) > request.memory_token_budget or not include(
                     "memories", memory_text
                 ):

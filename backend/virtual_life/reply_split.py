@@ -15,6 +15,7 @@ bubble so no content is dropped.
 
 from __future__ import annotations
 
+import json
 import re
 
 # Sentence terminators: CJK full-width, ASCII, and semicolons; newlines are
@@ -108,3 +109,95 @@ def _hard_chunk(text: str, max_chars: int, max_messages: int) -> list[str]:
     head = chunks[: max_messages - 1]
     tail = "".join(chunks[max_messages - 1 :])
     return head + [tail]
+
+
+def _squash(text: str) -> str:
+    """Remove all whitespace so a split can be compared to its source verbatim."""
+    return "".join(text.split())
+
+
+def _llm_split_prompt(text: str, max_messages: int, max_chars: int) -> str:
+    return (
+        "把下面的回复原文切分为若干条短消息，像聊天软件里连发几条那样自然。\n"
+        "必须遵守的规则：\n"
+        "1. 只能在原文的字符之间切分：每条消息都必须是原文的逐字片段，"
+        "不得改写、增删、调换标点或语气。\n"
+        "2. 顺序保持不变，所有消息按顺序拼接后必须等于原文（忽略首尾空白）。\n"
+        f"3. 至多 {max_messages} 条；每条尽量不超过 {max_chars} 字。\n"
+        '4. 只输出 JSON 对象：{{"messages": ["第一条", "第二条", ...]}}，不要输出其他内容。\n'
+        f"原文：\n{text}"
+    )
+
+
+def llm_split_reply(
+    text: str,
+    provider,
+    *,
+    model: str,
+    companion_id: str,
+    task_id: str = "dialogue_llm_split",
+    max_messages: int = 3,
+    max_chars: int = 120,
+    input_token_limit: int = 4096,
+    output_token_limit: int = 400,
+) -> list[str] | None:
+    """Model-assisted semantic split of a long reply into short bubbles.
+
+    Conservative port of MaiBot's ``llm_sentence_splitter``: the model is only
+    allowed to choose *where* to cut the original text. The returned list is
+    accepted only after a verbatim check — the bubbles, concatenated and
+    stripped of whitespace, must reproduce the original text exactly. Any
+    provider error, unparseable output, or failed verification returns ``None``
+    so the caller falls back to the deterministic ``split_reply`` rules.
+    """
+    if not text or not text.strip() or not model.strip() or provider is None:
+        return None
+    if max_messages < 1:
+        max_messages = 1
+    from .ports import ModelRequest  # local import keeps module import side-effect free
+
+    request = ModelRequest(
+        task_id=task_id,
+        companion_id=companion_id,
+        purpose="dialogue",
+        model=model,
+        context_text=_llm_split_prompt(text, max_messages, max_chars),
+        input_token_limit=input_token_limit,
+        output_token_limit=output_token_limit,
+    )
+    try:
+        result = provider.complete(request)
+        raw = result.text
+    except Exception:  # noqa: BLE001 - any provider failure falls back to rules
+        return None
+    if not raw or not raw.strip():
+        return None
+
+    # The model may wrap the JSON in prose or fences; find the outermost object.
+    candidates = []
+    start = raw.find("{")
+    end = raw.rfind("}")
+    if start != -1 and end > start:
+        candidates.append(raw[start : end + 1])
+    candidates.append(raw)
+    messages: list[str] = []
+    for candidate in candidates:
+        try:
+            parsed = json.loads(candidate)
+        except (ValueError, TypeError):
+            continue
+        if isinstance(parsed, dict):
+            value = parsed.get("messages")
+        elif isinstance(parsed, list):
+            value = parsed
+        else:
+            continue
+        if isinstance(value, list) and all(isinstance(item, str) for item in value):
+            messages = [item.strip() for item in value]
+            break
+    if not messages or len(messages) > max_messages:
+        return None
+    # Verbatim verification: joined bubbles must reproduce the source text.
+    if _squash("".join(messages)) != _squash(text):
+        return None
+    return messages

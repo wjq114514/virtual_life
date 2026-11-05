@@ -84,6 +84,9 @@ data class DialogueResult(
     @SerialName("companion_id") val companionId: String,
     val status: DialogueStatus,
     @SerialName("assistant_message") val assistantMessage: String? = null,
+    @SerialName("reply_messages") val replyMessages: List<String>? = null,
+    /** "none" | "rules" | "llm"; null when the server omits the field. */
+    @SerialName("reply_split_engine") val replySplitEngine: String? = null,
     @SerialName("source_event_id") val sourceEventId: String? = null,
     val preview: PersonalityPreviewResult,
     val model: String? = null,

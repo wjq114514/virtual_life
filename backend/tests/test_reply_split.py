@@ -123,3 +123,64 @@ class TestReplyMessagesInDialogue:
             assert result["status"] == "completed"
             assert result["assistant_message"]
             assert result["reply_messages"] is None
+
+
+class TestReplySplitEngineField:
+    def test_reply_split_engine_rules_when_split(self, tmp_path):
+        provider = LongProvider()
+        settings = Settings(
+            database_path=str(tmp_path / "engine.sqlite"),
+            api_token="test-token",
+            model_base_url="http://model.invalid",
+            model_name="fake",
+            dialogue_reply_split_enabled=True,
+            dialogue_reply_split_max_messages=3,
+            dialogue_reply_split_max_chars=40,
+        )
+        app = create_app(settings, model_provider=provider)
+        with TestClient(app, headers={"Authorization": "Bearer test-token"}) as client:
+            state = attach_desktop(client)
+            response = client.post(
+                "/v1/companions/sui/dialogue",
+                json={
+                    "command_id": "engine-rules",
+                    "node_id": "desk",
+                    "epoch": state["epoch"],
+                    "expected_revision": state["revision"],
+                    "user_message": "这个方案你觉得怎么样",
+                },
+            )
+            assert response.status_code == 200, response.text
+            result = response.json()
+            assert result["status"] == "completed"
+            # no LLM splitter configured: the deterministic rules engine runs
+            assert result["reply_split_engine"] == "rules"
+            assert result["reply_messages"] is not None
+
+    def test_reply_split_engine_none_when_disabled(self, tmp_path):
+        provider = LongProvider()
+        settings = Settings(
+            database_path=str(tmp_path / "engine-off.sqlite"),
+            api_token="test-token",
+            model_base_url="http://model.invalid",
+            model_name="fake",
+            dialogue_reply_split_enabled=False,
+        )
+        app = create_app(settings, model_provider=provider)
+        with TestClient(app, headers={"Authorization": "Bearer test-token"}) as client:
+            state = attach_desktop(client)
+            response = client.post(
+                "/v1/companions/sui/dialogue",
+                json={
+                    "command_id": "engine-none",
+                    "node_id": "desk",
+                    "epoch": state["epoch"],
+                    "expected_revision": state["revision"],
+                    "user_message": "这个方案你觉得怎么样",
+                },
+            )
+            assert response.status_code == 200, response.text
+            result = response.json()
+            assert result["status"] == "completed"
+            assert result["reply_split_engine"] == "none"
+            assert result["reply_messages"] is None
