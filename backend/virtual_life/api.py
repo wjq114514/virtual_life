@@ -1047,9 +1047,7 @@ def create_app(
                         "enabled": inner_life.policy.action_enabled
                         and bool(inner_life.policy.action_adb_serial),
                         "serial": inner_life.policy.action_adb_serial,
-                        "open_app_whitelist": list(
-                            inner_life.policy.action_open_app_whitelist
-                        ),
+                        "open_app_whitelist": list(inner_life.policy.action_open_app_whitelist),
                     },
                     "policy": inner_life.policy.model_dump(mode="json"),
                 },
@@ -1217,6 +1215,17 @@ def create_app(
     @router.get("/nodes/{node_id}/attention", response_model=AttentionSnapshot, tags=["perception"])
     def get_attention(node_id: str):
         return proactivity.get_attention(node_id)
+
+    @router.get(
+        "/companions/{companion_id}/attention",
+        response_model=AttentionSnapshot,
+        tags=["perception"],
+    )
+    def get_companion_attention(companion_id: str):
+        """Merged cross-node view: the freshest attention sample among the
+        companion's recently active nodes, so perception survives device
+        switches (output gates stay per-node)."""
+        return proactivity.get_companion_attention(companion_id)
 
     @router.get("/nodes/{node_id}/focus", response_model=FocusSnapshot, tags=["perception"])
     def get_focus(node_id: str):

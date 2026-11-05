@@ -755,3 +755,80 @@ def test_schedule_and_boundary_user_message_carry_context(runtime):
     assert "很久没有和用户交谈" in captured[1]  # schedule scaffold retained
     # One model call for the seeded user turn; the proactive turns park externally.
     assert len(provider.requests) == 1
+
+
+def _register_phone(app):
+    app.state.coordinator.register_node(
+        {
+            "node_id": "phone",
+            "label": "phone",
+            "kind": "android",
+            "capabilities": ["text.display", "attention.observe"],
+        }
+    )
+
+
+def _observe_phone(client, runtime, sequence, **changes):
+    body = sample(runtime, sequence, boundary="none", boundary_id=None, **changes)
+    response = client.post(
+        "/v1/nodes/phone/attention",
+        json={"command_id": "phone-" + str(sequence), "sample": body},
+    )
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+def test_companion_attention_merges_across_devices(runtime):
+    client, app, clock, _, _ = runtime
+    _register_phone(app)
+    # The user is on the desk first, then moves to the phone without the
+    # room-follow moving the companion (sample says user not present there).
+    observe(runtime)
+    clock.value += timedelta(minutes=1)
+    _observe_phone(client, runtime, 1, user_present=False)
+    merged = client.get("/v1/companions/sui/attention").json()
+    assert merged["node_id"] == "phone"
+    assert merged["stale"] is False
+    assert merged["sample"]["sequence"] == 1
+    # The per-node views stay untouched by the merged read.
+    assert client.get("/v1/nodes/desk/attention").json()["stale"] is False
+    assert client.get("/v1/nodes/phone/attention").json()["stale"] is False
+
+
+def test_companion_attention_falls_back_when_all_stale(runtime):
+    client, app, clock, _, _ = runtime
+    _register_phone(app)
+    observe(runtime)
+    clock.value += timedelta(minutes=1)
+    _observe_phone(client, runtime, 1, user_present=False)
+    # Long sleep: every live sample expires.
+    clock.value += timedelta(hours=1)
+    merged = client.get("/v1/companions/sui/attention").json()
+    assert merged["stale"] is True
+    assert merged["sample"] is None
+    assert merged["node_id"] == "desk"  # companion's active room
+
+
+def test_inner_preflight_survives_device_switch(runtime):
+    client, app, clock, _, _ = runtime
+    policy(runtime)
+    _register_phone(app)
+    # Desk sample exists but ages out; the fresher phone sample keeps the
+    # companion's cross-device perception alive for the inner preflight.
+    observe(runtime)
+    clock.value += timedelta(minutes=10)  # desk ttl is 90 seconds
+    _observe_phone(client, runtime, 1)
+    assert client.get("/v1/nodes/desk/attention").json()["stale"] is True
+    proact = app.state.proactivity
+    companion = app.state.coordinator.get_companion("sui")
+    activity = {
+        "activity_id": "ina-device-switch",
+        "urge": 0.8,
+        "attention_boundary_id": None,
+    }
+    with proact.store.transaction() as connection:
+        assert proact._inner_preflight(connection, companion, activity, clock.value) is True
+    # Without any live sample the preflight stays closed.
+    clock.value += timedelta(hours=1)
+    with proact.store.transaction() as connection:
+        assert proact._inner_preflight(connection, companion, activity, clock.value) is False

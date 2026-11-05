@@ -43,6 +43,7 @@
 | --- | --- |
 | `POST /v1/nodes/{node_id}/attention` | `{command_id, sample}`；原子保存快照、必要的观察事件、候选与命令回执 |
 | `GET /v1/nodes/{node_id}/attention` | 当前快照与 stale；无样本时 sample=null、stale=true |
+| `GET /v1/companions/{companion_id}/attention` | 跨设备合并视图：取所有未过期节点样本中 `sampled_at` 最新者；全部过期时 stale=true、node 为当前活跃房间。仅恢复感知，输出门仍按节点 |
 | `GET /v1/nodes/{node_id}/focus` | 连续专注建议快照、保护状态与最近已完成专注段；读取不写状态 |
 | `GET /v1/companions/{id}/proactivity` | 默认关闭的策略、独立 revision |
 | `POST /v1/companions/{id}/proactivity` | `{command_id, expected_revision, policy}`；完整替换策略，CAS 与幂等 |

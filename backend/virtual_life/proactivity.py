@@ -862,6 +862,41 @@ class ProactivityService:
         with self.store.transaction() as connection:
             return self._attention(connection, node_id, self.coordinator._now())
 
+    def _companion_attention(self, connection, companion, now):
+        """Companion-level merged attention view.
+
+        Attention samples are stored per node, so a user who moves from the
+        desk to the phone would otherwise read as absent the moment the old
+        node's sample goes stale. This view scans every node's live sample and
+        keeps the freshest non-stale one, so perception follows the user
+        across devices even before the room-follow moves the companion.
+        Output gates stay per-node; this only restores perception.
+        """
+        best = None
+        rows = connection.execute("SELECT * FROM attention_samples").fetchall()
+        for row in rows:
+            if _instant(row["expires_at"]) <= now:
+                continue
+            view = self._attention(connection, row["node_id"], now)
+            if view["stale"] or view["sample"] is None:
+                continue
+            if best is None or view["sample"]["sampled_at"] > best["sample"]["sampled_at"]:
+                best = view
+        if best is None:
+            return {
+                "node_id": companion["active_node_id"],
+                "source_event_id": None,
+                "sample": None,
+                "expires_at": None,
+                "stale": True,
+            }
+        return best
+
+    def get_companion_attention(self, companion_id):
+        companion = self.coordinator.get_companion(companion_id)
+        with self.store.transaction() as connection:
+            return self._companion_attention(connection, companion, self.coordinator._now())
+
     def observe(self, node_id, payload):
         data = AttentionObservation.model_validate(payload).model_dump(mode="json")
         sample = data["sample"]
@@ -1207,7 +1242,7 @@ class ProactivityService:
             return False
         if self.dialogue.provider is None or not self.dialogue.model_name:
             return False
-        attention = self._attention(connection, companion["active_node_id"], now)
+        attention = self._companion_attention(connection, companion, now)
         if attention["stale"] or attention["sample"] is None:
             return False
         sample = attention["sample"]

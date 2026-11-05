@@ -1657,6 +1657,54 @@
         }
       }
     },
+    "/v1/companions/{companion_id}/attention": {
+      "get": {
+        "tags": [
+          "perception"
+        ],
+        "summary": "Get Companion Attention",
+        "description": "Merged cross-node view: the freshest attention sample among the\ncompanion's recently active nodes, so perception survives device\nswitches (output gates stay per-node).",
+        "operationId": "get_companion_attention_v1_companions__companion_id__attention_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "companion_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Companion Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AttentionSnapshot"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/nodes/{node_id}/focus": {
       "get": {
         "tags": [
