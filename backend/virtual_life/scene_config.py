@@ -13,9 +13,11 @@ from dataclasses import dataclass, field
 from .scene_classifier.labels import LABELS
 
 SCENE_MODES: tuple[str, ...] = ("off", "observe", "route")
-SCENE_BACKENDS: tuple[str, ...] = ("auto", "onnx", "torch")
+SCENE_BACKENDS: tuple[str, ...] = ("auto", "onnx", "torch", "service")
 MAX_ARTIFACT_CHARS = 4096
 MAX_MODEL_CHARS = 256
+MAX_SERVICE_URL_CHARS = 2048
+MAX_SERVICE_TOKEN_CHARS = 256
 MIN_TIMEOUT_SECONDS = 0.01
 MAX_TIMEOUT_SECONDS = 30.0
 
@@ -30,6 +32,8 @@ class SceneClassifierConfig:
     prefer_int8: bool = True
     max_chars: int = 2048
     timeout_seconds: float = 1.0
+    service_url: str = ""
+    service_token: str = ""
     models: dict[str, str] = field(default_factory=dict)
 
     @property
@@ -74,7 +78,7 @@ def scene_classifier_config(value: object) -> SceneClassifierConfig:
         raise ValueError(
             f"scene_classifier.artifact must not exceed {MAX_ARTIFACT_CHARS} characters"
         )
-    if config.mode != "off" and not artifact:
+    if config.mode != "off" and config.backend != "service" and not artifact:
         raise ValueError("scene_classifier.artifact must not be empty when enabled")
     if not isinstance(config.backend, str):
         raise ValueError("scene_classifier.backend must be a string")
@@ -120,6 +124,26 @@ def scene_classifier_config(value: object) -> SceneClassifierConfig:
             models[label] = model
     if config.mode == "route" and not models:
         raise ValueError("scene_classifier.mode=route requires at least one models entry")
+    service_url = config.service_url.strip()
+    if not isinstance(config.service_url, str):
+        raise ValueError("scene_classifier.service_url must be a string")
+    if not isinstance(config.service_token, str):
+        raise ValueError("scene_classifier.service_token must be a string")
+    if len(service_url) > MAX_SERVICE_URL_CHARS:
+        raise ValueError(
+            f"scene_classifier.service_url must not exceed {MAX_SERVICE_URL_CHARS} characters"
+        )
+    if len(config.service_token) > MAX_SERVICE_TOKEN_CHARS:
+        raise ValueError(
+            f"scene_classifier.service_token must not exceed {MAX_SERVICE_TOKEN_CHARS} characters"
+        )
+    if config.backend == "service":
+        if not service_url.startswith(("http://", "https://")):
+            raise ValueError(
+                "scene_classifier.service_url must be an http(s) URL when backend=service"
+            )
+        if config.mode != "off" and not service_url:
+            raise ValueError("scene_classifier.service_url must not be empty when backend=service")
     return SceneClassifierConfig(
         mode=config.mode,
         artifact=artifact,
@@ -129,5 +153,7 @@ def scene_classifier_config(value: object) -> SceneClassifierConfig:
         prefer_int8=config.prefer_int8,
         max_chars=config.max_chars,
         timeout_seconds=float(timeout),
+        service_url=service_url,
+        service_token=config.service_token,
         models=models,
     )

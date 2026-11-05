@@ -1,8 +1,10 @@
 """Scene-classifier routing and observe-mode integration contracts."""
 
+import json
 import os
 import time
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 from test_api import attach_desktop
@@ -236,3 +238,106 @@ def test_scene_settings_reject_invalid_configuration(tmp_path, document, clean_s
     path.write_text(document, encoding="utf8")
     with pytest.raises(ValueError):
         Settings.load(path)
+
+
+class _ServiceRecorder:
+    def __init__(self, response, statuses=None):
+        self.response = response
+        self.statuses = statuses or [200]
+        self.requests = []
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        self.requests.append(request)
+        status = self.statuses[min(len(self.requests) - 1, len(self.statuses) - 1)]
+        return httpx.Response(status, json=self.response)
+
+
+def test_service_predictor_parses_classify_response():
+    import httpx
+    from virtual_life.scene_classifier.inference import ServicePredictor
+
+    payload = {
+        "label": "emotional",
+        "confidence": 0.81,
+        "scores": {"daily": 0.1, "emotional": 0.81, "intimate": 0.05, "explicit": 0.04},
+        "reason": "threshold",
+        "threshold": 0.5,
+        "model": "bert-base",
+        "version": "v2c8",
+        "backend": "onnx",
+        "latency_ms": 3.2,
+    }
+    recorder = _ServiceRecorder(payload)
+    predictor = ServicePredictor(
+        "http://127.0.0.1:8039",
+        token="secret",
+        transport=httpx.MockTransport(recorder),
+    )
+    decision = predictor.predict("今天心情有点低落")
+    assert decision.label == "emotional"
+    assert decision.confidence == pytest.approx(0.81)
+    assert decision.scores["emotional"] == pytest.approx(0.81)
+    assert decision.threshold == pytest.approx(0.5)
+    assert predictor.version == "v2c8"
+    request = recorder.requests[0]
+    assert request.url.path == "/classify"
+    assert request.headers["authorization"] == "Bearer secret"
+    assert json.loads(request.read()) == {"text": "今天心情有点低落"}
+
+
+def test_service_backend_degrades_when_service_is_down():
+    config = SceneClassifierConfig(
+        mode="observe",
+        backend="service",
+        service_url="http://127.0.0.1:9",
+        timeout_seconds=1.0,
+    )
+    classifier = SceneClassifier(config)
+    assert classifier.available
+    observation = classifier.classify("陪我聊会儿天")
+    assert observation is not None
+    assert observation.mode == "observe"
+    assert observation.error_code in (
+        "classifier_failed",
+        "classifier_timeout",
+        "classifier_unavailable",
+    )
+    classifier.close()
+
+
+@pytest.mark.parametrize(
+    "document",
+    [
+        '[scene_classifier]\nmode = "observe"\nbackend = "service"\n',
+        '[scene_classifier]\nmode = "observe"\nbackend = "service"\nservice_url = "ftp://x"\n',
+    ],
+)
+def test_scene_settings_reject_invalid_service_configuration(
+    tmp_path, document, clean_scene_environment
+):
+    path = tmp_path / "invalid-service.toml"
+    path.write_text(document, encoding="utf8")
+    with pytest.raises(ValueError):
+        Settings.load(path)
+
+
+def test_scene_settings_accept_service_backend(tmp_path, clean_scene_environment, monkeypatch):
+    path = tmp_path / "service.toml"
+    path.write_text(
+        "[scene_classifier]\n"
+        'mode = "route"\n'
+        'backend = "service"\n'
+        'service_url = "http://127.0.0.1:8039"\n'
+        'models = { emotional = "warm-model" }\n',
+        encoding="utf8",
+    )
+    settings = Settings.load(path)
+    assert settings.scene_classifier.backend == "service"
+    assert settings.scene_classifier.service_url == "http://127.0.0.1:8039"
+    assert settings.scene_classifier.models == {"emotional": "warm-model"}
+
+    monkeypatch.setenv("VIRTUAL_LIFE_SCENE_CLASSIFIER_SERVICE_URL", "http://127.0.0.1:8040")
+    monkeypatch.setenv("VIRTUAL_LIFE_SCENE_CLASSIFIER_SERVICE_TOKEN", "tok")
+    settings = Settings.load(path)
+    assert settings.scene_classifier.service_url == "http://127.0.0.1:8040"
+    assert settings.scene_classifier.service_token == "tok"

@@ -264,6 +264,78 @@ class FakePredictor:
         return None
 
 
+class ServicePredictor:
+    """HTTP adapter for the standalone classifier service (``scripts/nsfw_server.py``).
+
+    The runtime process stays free of onnxruntime/transformers: decisions are
+    made by the service, which already applies its own thresholds.  Failures
+    raise and are handled by the fail-open ``SceneClassifier`` wrapper.
+    """
+
+    backend = "service"
+
+    def __init__(
+        self,
+        base_url: str,
+        *,
+        token: str = "",
+        timeout_seconds: float = 2.0,
+        transport: Any | None = None,
+    ) -> None:
+        import httpx
+
+        if not base_url.startswith(("http://", "https://")):
+            raise ValueError("service_url must be an http(s) URL")
+        self.base_url = base_url.rstrip("/")
+        self.model_name = "remote-service"
+        self.version = "service"
+        headers = {"authorization": f"Bearer {token}"} if token else None
+        self._client = httpx.Client(
+            base_url=self.base_url,
+            timeout=timeout_seconds,
+            headers=headers,
+            transport=transport,
+        )
+
+    def predict_proba(self, text: str) -> tuple[float, ...]:
+        decision = self.predict(text)
+        return tuple(float(decision.scores.get(label, 0.0)) for label in LABELS)
+
+    def predict_proba_many(
+        self, texts: Sequence[str], *, batch_size: int = 32
+    ) -> list[tuple[float, ...]]:
+        if isinstance(texts, str):
+            texts = [texts]
+        return [self.predict_proba(text) for text in texts]
+
+    def predict(self, text: str, thresholds: Thresholds | None = None) -> SceneDecision:
+        # Thresholds live on the service side; the local argument is ignored.
+        response = self._client.post("/classify", json={"text": text})
+        response.raise_for_status()
+        payload = response.json()
+        label = payload.get("label")
+        if label not in LABELS:
+            raise ValueError(f"classifier service returned unknown label: {label!r}")
+        scores = payload.get("scores") or {}
+        version = payload.get("version")
+        if isinstance(version, str) and version:
+            self.version = version
+        threshold = payload.get("threshold")
+        return SceneDecision(
+            label=str(label),
+            confidence=float(payload.get("confidence", 0.0)),
+            scores={str(key): float(score) for key, score in scores.items()},
+            reason=str(payload.get("reason", "threshold")),
+            threshold=None if threshold is None else float(threshold),
+        )
+
+    def warmup(self) -> None:
+        return None
+
+    def close(self) -> None:
+        self._client.close()
+
+
 def build_predictor(
     artifact_dir: str | Path,
     *,

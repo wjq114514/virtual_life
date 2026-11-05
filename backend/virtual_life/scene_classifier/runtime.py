@@ -106,6 +106,31 @@ class SceneClassifier:
             self._start_worker()
 
     def _load(self) -> None:
+        if self.config.backend == "service":
+            try:
+                from .inference import ServicePredictor
+
+                predictor = ServicePredictor(
+                    self.config.service_url,
+                    token=self.config.service_token,
+                    timeout_seconds=self.config.timeout_seconds,
+                )
+            except Exception as exc:
+                self._error_code = _ERROR_UNAVAILABLE
+                logger.warning(
+                    "Scene classifier service is unavailable; dialogue will continue "
+                    "without it: %s",
+                    exc,
+                )
+                return
+            self._predictor = predictor
+            # Decisions (and thresholds) come from the service; a local default
+            # only satisfies the readiness checks in ``classify``.
+            self._thresholds = Thresholds()
+            self._backend = "service"
+            self._version = getattr(predictor, "version", None)
+            self._start_worker()
+            return
         try:
             _, limits = load_artifact(self.config.artifact)
             predictor = build_predictor(
@@ -217,6 +242,13 @@ class SceneClassifier:
         return result
 
     def close(self) -> None:
+        predictor, self._predictor = self._predictor, None
+        closer = getattr(predictor, "close", None)
+        if callable(closer):
+            try:
+                closer()
+            except Exception:  # pragma: no cover - shutdown is best effort
+                pass
         if self._executor is None:
             return
         self._executor.shutdown(wait=False, cancel_futures=True)
