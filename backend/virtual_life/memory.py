@@ -545,6 +545,22 @@ class MemoryService:
         finally:
             connection.close()
 
+    @contextmanager
+    def _tx(self, via: sqlite3.Connection | None = None, *, write: bool = False) -> Iterator[sqlite3.Connection]:
+        """Run on an ambient transaction's connection when one is provided.
+
+        Callers inside a storage.transaction() block pass their connection as
+        ``via`` so the ledger shares the ambient write transaction instead of
+        opening a second BEGIN IMMEDIATE (which would deadlock on the ambient
+        writer for the whole busy_timeout). The ambient transaction owns commit
+        and rollback; this helper never commits.
+        """
+        if via is not None:
+            yield via
+            return
+        with self._connection(write=write) as connection:
+            yield connection
+
     def _now(self) -> datetime:
         value = self.clock()
         if isinstance(value, datetime):
@@ -2000,7 +2016,9 @@ class MemoryService:
             "token_quota": quota,
         }
 
-    def reserve_model_tokens(self, companion_id: str, payload: dict) -> dict:
+    def reserve_model_tokens(
+        self, companion_id: str, payload: dict, *, via: sqlite3.Connection | None = None
+    ) -> dict:
         """Reserve before a future provider job; retries never create another hold.
 
         new_reservation tells a job runner whether it created the task. The
@@ -2016,7 +2034,7 @@ class MemoryService:
         now = self._now()
         day = now.date().isoformat()
         timestamp = self._timestamp(now)
-        with self._connection(write=True) as connection:
+        with self._tx(via, write=True) as connection:
             existing = connection.execute(
                 "SELECT * FROM memory_token_tasks WHERE task_id = ?", (request.task_id,)
             ).fetchone()
@@ -2075,12 +2093,14 @@ class MemoryService:
             )
         return row
 
-    def settle_model_tokens(self, companion_id: str, task_id: str, payload: dict) -> dict:
+    def settle_model_tokens(
+        self, companion_id: str, task_id: str, payload: dict, *, via: sqlite3.Connection | None = None
+    ) -> dict:
         """Persist observed usage, including overruns and usage after a release."""
         companion_id = self._identifier(companion_id, "companion_id")
         task_id = self._identifier(task_id, "task_id")
         request = self._validate(_Settlement, payload)
-        with self._connection(write=True) as connection:
+        with self._tx(via, write=True) as connection:
             row = self._find_task(connection, companion_id, task_id)
             if row["status"] == "settled":
                 if (
@@ -2106,11 +2126,13 @@ class MemoryService:
             row = self._find_task(connection, companion_id, task_id)
             return self._task_result(connection, row)
 
-    def release_model_tokens(self, companion_id: str, task_id: str) -> dict:
+    def release_model_tokens(
+        self, companion_id: str, task_id: str, *, via: sqlite3.Connection | None = None
+    ) -> dict:
         """Release a canceled job's hold; settled usage cannot be erased."""
         companion_id = self._identifier(companion_id, "companion_id")
         task_id = self._identifier(task_id, "task_id")
-        with self._connection(write=True) as connection:
+        with self._tx(via, write=True) as connection:
             row = self._find_task(connection, companion_id, task_id)
             if row["status"] == "settled":
                 raise MemoryError(

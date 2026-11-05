@@ -19,7 +19,7 @@
 | agency | -1..1 | 自己到他人的责任线索，正值偏向说话者 |
 | control | 0..1 | 情境控制线索，中性为 0.5 |
 
-每项经历还返回 `appraisal_version="rules_v2"`、`confidence`、顶层 `uncertainty` 和 `attribution=self|other|situation|unspecified`。归因是规则对线索的解释；这些值不衡量用户心理状态，也不证明实际因果。未识别内容的 confidence=0、uncertainty=1。旧记录返回 appraisal=null、appraisal_version=legacy_v1，不补造历史评价。情感台账不复制消息正文。
+每项经历还返回 `appraisal_version`、`confidence`、顶层 `uncertainty` 和 `attribution=self|other|situation|unspecified`：整句精确匹配（fullmatch）返回 `appraisal_version="rules_v2"`；包含式回退命中（长句中嵌入的情绪词）返回 `appraisal_version="rules_v3"`，置信度较低（0.45~0.55），且仅限第一人称、当下、未否定的表达。归因是规则对线索的解释；这些值不衡量用户心理状态，也不证明实际因果。未识别内容的 confidence=0、uncertainty=1。旧记录返回 appraisal=null、appraisal_version=legacy_v1，不补造历史评价。情感台账不复制消息正文。
 
 ## 连续状态与分维度恢复
 

@@ -13,11 +13,15 @@ is said.
 
 import hashlib
 import json
+import logging
 import math
+import re
+import subprocess
 from datetime import timedelta
+from pathlib import Path
 from typing import Literal
 
-from pydantic import Field, ValidationError
+from pydantic import Field, ValidationError, field_validator
 
 from .coordinator import _instant, _timestamp
 from .memory import MemoryError
@@ -25,6 +29,7 @@ from .model_provider import ProviderError, estimate_chat_input_tokens
 from .models import Identifier, RequestModel
 from .personality import PersonalityError, _json
 from .ports import ModelRequest
+from .rhythm import rhythm_snapshot
 
 InnerActivityKind = Literal["restless", "curious", "concerned", "reflective", "content", "resting"]
 InnerActivityStatus = Literal["active", "expired"]
@@ -40,11 +45,73 @@ InnerActivityGenerator = Literal["rules_v1", "model_v1"]
 
 _ACTIVITY_CATEGORIES = {"code", "docs", "terminal", "browser", "chat"}
 _MIN_SALIENCE = 0.12
+logger = logging.getLogger(__name__)
+# Inner actions: when a curious/restless impulse is strong enough, the runtime
+# may look at (screencap) or act on (open a whitelisted app) a local emulator
+# through adb. Every command is non-root, whitelist-gated, and wrapped in
+# try/except so a missing emulator never touches the dialogue path.
+# First-person memory lines for executed inner actions. The {app} slot is the
+# short name of the opened package (last path segment) or a generic word.
+_ACTION_MEMORY_TEMPLATES: dict[str, tuple[str, ...]] = {
+    "look_ok": (
+        "我有点好奇，刚才自己看了一眼手机屏幕，想离你的世界近一点。",
+        "趁没人在意，我瞄了一眼手机屏幕；当时在{app}，这个印象我记在心里。",
+    ),
+    "look_failed": ("我想看一眼手机屏幕，没看成。有点不甘心，下次再说。",),
+    "open_app_ok": (
+        "我坐不太住，刚才自己在手机上打开了{app}看了看。",
+        "闲着也是闲着，我自己打开了手机上的{app}，待了一小会儿。",
+    ),
+    "open_app_failed": ("我想打开手机上的{app}看看，没成功，有点小挫败。",),
+}
+
+_ACTION_EVENT = "companion.inner_action"
+_ACTION_KINDS = ("curious", "restless")
+_ADB_TIMEOUT_SECONDS = 30
+_ADB_DEVICE_TIMEOUT_SECONDS = 10
+_PNG_MAGIC = b"\x89PNG"
+# A long-unmet inner impulse decays exponentially; both its salience and its
+# urge fade with the same half-life so the proactive threshold (which reads
+# urge) is also quieted after a long silence.
+_SALIENCE_HALF_LIFE_SECONDS = 7200.0
+# A gap >= 6h that ends in daytime is treated as sleep: the companion slept
+# on the feeling instead of ignoring it. Fade is then the gentle wake factor
+# below rather than exp(-elapsed/half-life) (~1e-6 after a full night).
+_SLEEP_SPAN_SECONDS = 6 * 3600.0
+_MORNING_WAKE_FACTOR = 0.55
+# Hourly bucket width for activity_id derivation (dedup granularity).
+_BUCKET_SECONDS = 3600
 _NEUTRAL = 0.5
 _MAX_JUDGE_BYTES = 16_384
 _MAX_RECENT_MESSAGES = 8
 _MAX_RECENT_MESSAGE_CHARS = 400
 _MODEL_PURPOSE = "inner_life"
+_ACTION_MEMORY_PURPOSE = "inner_action_memory"
+_ACTION_MEMORY_OUTPUT_TOKENS = 64
+# How long a completed action stays "recent" enough to color the next inner
+# monologue (the follow-up channel: "我刚才顺手…").
+_ACTION_FOLLOWUP_SECONDS = 3 * 3600
+# Look actions also record which app was in the foreground (from dumpsys, not
+# from the pixels themselves): the companion "glanced and saw the screen was on
+# X". Known packages get a friendly Chinese label; unknown ones fall back to
+# the last package segment.
+_APP_LABELS = {
+    "com.android.settings": "设置",
+    "com.google.android.deskclock": "时钟",
+    "com.android.chrome": "浏览器",
+    "com.android.vending": "应用商店",
+    "com.android.documentsui": "文件",
+}
+_FOREGROUND_RE = re.compile(r"topResumedActivity=(?:ComponentInfo\{)?([a-zA-Z0-9_.]+)/")
+
+
+def _app_label(package: str | None) -> str:
+    """Friendly short name for a package; generic word when unknown/absent."""
+    if not package:
+        return "应用"
+    if package in _APP_LABELS:
+        return _APP_LABELS[package]
+    return package.rsplit(".", 1)[-1] or "应用"
 
 
 class InnerLifePolicy(RequestModel):
@@ -62,6 +129,31 @@ class InnerLifePolicy(RequestModel):
     model_output_token_limit: int = Field(default=200, ge=1, le=1_000)
     model_min_confidence: float = Field(default=0.55, ge=0, le=1)
     model_weight: float = Field(default=0.5, ge=0, le=1)
+    action_enabled: bool = True
+    action_min_interval_seconds: int = Field(default=1_800, ge=60, le=86_400)
+    action_daily_limit: int = Field(default=8, ge=1, le=100)
+    action_curious_min_salience: float = Field(default=0.35, ge=0, le=1)
+    action_observer_node_id: str = Field(default="", max_length=128)
+    action_adb_serial: str = Field(default="", max_length=128)
+    action_open_app_whitelist: tuple[str, ...] = Field(default=(), max_length=32)
+    action_analysis_wait_seconds: int = Field(default=45, ge=0, le=300)
+    # Screenshots taken by "look" actions land here (created on demand); the
+    # path is recorded in the companion.inner_action event payload.
+    action_screenshot_dir: str = Field(default=".data/inner_actions", max_length=512)
+
+    @field_validator("action_open_app_whitelist", mode="before")
+    @classmethod
+    def coerce_whitelist(cls, value: object) -> object:
+        # strict=True rejects a JSON/TOML list for a tuple field; accept both.
+        if isinstance(value, list):
+            return tuple(value)
+        return value
+
+    # Local-time rhythm: deep night (23:00-05:00) quiets the social need, the
+    # small hours lean toward rest. Timezone is any IANA name; an unusable
+    # name falls back to the host's local timezone (see rhythm.py).
+    rhythm_enabled: bool = True
+    rhythm_timezone: str = Field(default="Asia/Shanghai", max_length=64)
 
 
 class InnerNeeds(RequestModel):
@@ -225,6 +317,51 @@ def _pick(texts: tuple[str, ...], key: str) -> str:
     return texts[int(digest[:8], 16) % len(texts)]
 
 
+def _adb_run(args: list[str], timeout: float = _ADB_TIMEOUT_SECONDS):
+    """Run one bounded adb command; callers treat any failure as "skip"."""
+    return subprocess.run(args, capture_output=True, timeout=timeout, check=False)
+
+
+def _foreground_app(serial: str) -> str | None:
+    """Package name of the currently resumed activity, or None.
+
+    One bounded adb call against `dumpsys activity activities`; any failure
+    (offline device, changed output, timeout) is treated as "unknown" so the
+    look action still succeeds with only the screenshot.
+    """
+    try:
+        result = _adb_run(
+            ["adb", "-s", serial, "shell", "dumpsys", "activity", "activities"],
+            timeout=_ADB_TIMEOUT_SECONDS,
+        )
+        if result.returncode != 0:
+            return None
+        text = result.stdout.decode("utf-8", errors="replace")
+        match = _FOREGROUND_RE.search(text)
+        return match.group(1) if match else None
+    except Exception:
+        return None
+
+
+def _adb_device_online(serial: str) -> bool:
+    """True when `adb devices` lists SERIAL in state "device"."""
+    try:
+        result = _adb_run(["adb", "devices"], timeout=_ADB_DEVICE_TIMEOUT_SECONDS)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    if result.returncode != 0:
+        return False
+    for line in result.stdout.decode("utf-8", "replace").splitlines():
+        parts = line.split()
+        if len(parts) >= 2 and parts[0] == serial and parts[1] == "device":
+            return True
+    return False
+
+
+def _stderr_text(result) -> str:
+    return (result.stderr or b"").decode("utf-8", "replace").strip()[:200]
+
+
 class InnerLifeService:
     """Compute and persist short-lived mental activities without a model."""
 
@@ -325,6 +462,18 @@ class InnerLifeService:
         ).fetchone()
         attention = self._attention(connection, row, now)
         activity = row["activity_json"] if "activity_json" in row.keys() else "{}"
+        # How long since the last *committed* inner activity. Used to fade a
+        # long-unmet impulse instead of re-firing the same line at full salience.
+        last_activity = connection.execute(
+            """SELECT created_at FROM inner_activities WHERE companion_id=?
+                ORDER BY sequence DESC LIMIT 1""",
+            (companion_id,),
+        ).fetchone()
+        elapsed_since_activity = (
+            max(0, int((now - _instant(last_activity["created_at"])).total_seconds()))
+            if last_activity
+            else 0
+        )
         context = {
             "profile": profile,
             "legacy": legacy,
@@ -336,6 +485,10 @@ class InnerLifeService:
             "last_interaction_at": last_interaction_at,
             "attention": attention,
             "activity_json": activity,
+            "elapsed_since_activity_seconds": elapsed_since_activity,
+            "last_activity_at": last_activity["created_at"] if last_activity else None,
+            "recent_action": self._recent_action(connection, companion_id, now),
+            "now": now,
         }
         payload = {
             "profile_revision": profile["revision"],
@@ -375,6 +528,20 @@ class InnerLifeService:
             * idle_factor
         )
         rest = _clamp(1 - float(effective["energy"]))
+        # Local-time rhythm (config [inner_life] rhythm_*): after 23:00 and
+        # before 05:00 the social need is quieted (nobody wants to be prodded
+        # at 2am), and in the small hours rest gets a nudge so "resting" can
+        # win over "restless". See rhythm.py for the day-part boundaries.
+        rhythm = (
+            rhythm_snapshot(context.get("now"), self.policy.rhythm_timezone)
+            if self.policy.rhythm_enabled
+            else None
+        )
+        if rhythm is not None:
+            if rhythm["is_deep_night"]:
+                social = _clamp(social * 0.6)
+            if rhythm["is_predawn"]:
+                rest = _clamp(rest + 0.15)
         warmth = float(slow["relationship_warmth"])
         initiative = float(traits["initiative"])
 
@@ -388,6 +555,30 @@ class InnerLifeService:
         }
         kind = max(scores, key=scores.get)
         salience = _clamp(scores[kind])
+        # A long-lived inner activity should fade: "I want to say something" that
+        # has been unmet for hours becomes a quieter, lower-salience thought, not
+        # a stuck 0.92 that fires the same line forever. Decay half-life ~2h
+        # (_SALIENCE_HALF_LIFE_SECONDS); salience and urge fade together so the
+        # proactive urge threshold is quieted as well. When salience falls below
+        # _MIN_SALIENCE, _prepare stops producing new activities.
+        elapsed = context.get("elapsed_since_activity_seconds") or 0
+        fade = 1.0
+        if elapsed > 0:
+            fade = math.exp(-elapsed / _SALIENCE_HALF_LIFE_SECONDS)
+            # Overnight reset: a gap that spans a night is sleep, not fading
+            # interest. When the companion last acted before a >=6h gap and it
+            # is now daytime (not deep night / pre-dawn), the stale fade would
+            # otherwise crush salience to ~1e-6 and leave it inert for the
+            # whole day. Replace the raw exponential with a gentler "slept on
+            # it" factor: remembered, but no longer urgent.
+            if (
+                elapsed >= _SLEEP_SPAN_SECONDS
+                and rhythm is not None
+                and not rhythm["is_deep_night"]
+                and not rhythm["is_predawn"]
+            ):
+                fade = _MORNING_WAKE_FACTOR
+            salience = _clamp(salience * fade)
         urges = {
             "restless": social * (0.55 + 0.45 * initiative) * (0.6 + 0.4 * warmth),
             "curious": curiosity * (0.35 + 0.55 * initiative),
@@ -406,7 +597,7 @@ class InnerLifeService:
         return {
             "kind": kind,
             "salience": round(salience, 6),
-            "urge": round(_clamp(urges[kind]), 6),
+            "urge": round(_clamp(urges[kind] * fade), 6),
             "needs": needs,
             "idle_seconds": idle,
         }
@@ -549,6 +740,9 @@ class InnerLifeService:
                 continue
             with self.store.transaction(write=True) as connection:
                 created += self._commit(connection, job, judgment, self.personality._now())
+        if self.policy.action_enabled:
+            for row in rows:
+                self._maybe_action(row["companion_id"], self.personality._now())
         return created
 
     def _prepare(self, connection, companion_id, now):
@@ -562,18 +756,20 @@ class InnerLifeService:
             return None
         if context["slow"]["sample_size"] < self.policy.min_evidence_items:
             return None
-        previous = connection.execute(
-            """SELECT created_at FROM inner_activities WHERE companion_id=?
-                ORDER BY sequence DESC LIMIT 1""",
-            (companion_id,),
-        ).fetchone()
+        # _context already queried the latest inner activity for the fade
+        # computation; reuse its elapsed value instead of re-querying here.
+        # A companion with no recorded activity yet is not blocked by the gap.
         if (
-            previous
-            and (now - _instant(previous["created_at"])).total_seconds()
-            < self.policy.min_activity_gap_seconds
+            context["last_activity_at"] is not None
+            and context["elapsed_since_activity_seconds"] < self.policy.min_activity_gap_seconds
         ):
             return None
-        bucket = int(now.timestamp()) // self.policy.min_activity_gap_seconds
+        # Hourly bucket: the previous min_activity_gap_seconds (600s) bucketing
+        # means a long-idle companion with an unchanged kind/context never gets a
+        # fresh activity_id, so the uniqueness guard silently suppresses new
+        # inner activities for hours. Hour buckets let a genuine re-emergence
+        # (e.g. a new restless thought after a long quiet stretch) be recorded.
+        bucket = int(now.timestamp()) // _BUCKET_SECONDS
         activity_id = (
             "ina_"
             + hashlib.sha256(
@@ -656,6 +852,38 @@ class InnerLifeService:
                 messages.append({"role": role, "content": content})
         return messages[-_MAX_RECENT_MESSAGES:]
 
+    def _recent_action(self, connection, companion_id, now):
+        """Latest completed inner action, if recent enough to color the next
+        inner monologue (the action-follow-up channel)."""
+        row = connection.execute(
+            """SELECT payload_json, occurred_at FROM events
+               WHERE companion_id=? AND type='companion.inner_action'
+               ORDER BY sequence DESC LIMIT 1""",
+            (companion_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        try:
+            payload = json.loads(row["payload_json"])
+        except (TypeError, ValueError):
+            return None
+        if payload.get("outcome") not in ("ok", "failed"):
+            return None
+        age = max(0, int((now - _instant(row["occurred_at"])).total_seconds()))
+        if age > _ACTION_FOLLOWUP_SECONDS:
+            return None
+        return {
+            "action": payload.get("action"),
+            "target": payload.get("target"),
+            "outcome": payload.get("outcome"),
+            "age_seconds": age,
+            **(
+                {"foreground_app": payload["foreground_app"]}
+                if payload.get("foreground_app")
+                else {}
+            ),
+        }
+
     def _model_prompt(self, connection, companion_id, context, state):
         definition = context["profile"]["definition"]
         style = definition.get("speech_style", {})
@@ -676,6 +904,8 @@ class InnerLifeService:
                     "promise anything, or recite the source evidence.",
                     "When the state is flat or the impression is thin, omit content "
                     "rather than inventing a feeling.",
+                    "When recent_action is present, you may let the monologue show "
+                    "that you just did it — a light trace of the doing, not a report.",
                 ],
                 "personality": {
                     "traits": definition.get("traits", {}),
@@ -704,6 +934,7 @@ class InnerLifeService:
                     "activity_category": attention["activity"] if attention else "unknown",
                     "attention_present": attention is not None,
                 },
+                "recent_action": context.get("recent_action"),
                 "recent_dialogue": self._recent_dialogue(connection, companion_id),
                 "allowed_kinds": list(_TEMPLATES),
                 "output_schema": {
@@ -910,6 +1141,303 @@ class InnerLifeService:
             return 0
         self._prune(connection, job["companion_id"])
         return 1
+
+    # -- Inner actions (experimental, adb-backed "look" / "do") -----------------
+
+    def _action_gates(self, connection, companion_id, now):
+        """Return the latest active activity when every action gate passes."""
+        policy = self.policy
+        row = connection.execute(
+            """SELECT activity_id, kind, salience FROM inner_activities
+                WHERE companion_id=? AND status='active'
+                ORDER BY sequence DESC LIMIT 1""",
+            (companion_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        if row["kind"] not in _ACTION_KINDS:
+            return None
+        if float(row["salience"]) < policy.action_curious_min_salience:
+            return None
+        last = connection.execute(
+            """SELECT occurred_at FROM events
+                WHERE companion_id=? AND type=?
+                ORDER BY sequence DESC LIMIT 1""",
+            (companion_id, _ACTION_EVENT),
+        ).fetchone()
+        if (
+            last is not None
+            and (now - _instant(last["occurred_at"])).total_seconds()
+            < policy.action_min_interval_seconds
+        ):
+            return None
+        day = now.date().isoformat()
+        count = connection.execute(
+            """SELECT COUNT(*) AS n FROM events
+                WHERE companion_id=? AND type=? AND occurred_at LIKE ?""",
+            (companion_id, _ACTION_EVENT, day + "%"),
+        ).fetchone()["n"]
+        if count >= policy.action_daily_limit:
+            return None
+        return row
+
+    def _choose_action(self, activity):
+        """curious → look at the screen; restless → do something.
+
+        Restless variety is deterministic per activity: mostly opening a
+        whitelisted app, but roughly one action in five is just a home or
+        back press — a small wandering gesture instead of always launching
+        into the same few apps."""
+        whitelist = self.policy.action_open_app_whitelist
+        if activity["kind"] == "restless":
+            digest = hashlib.sha256(activity["activity_id"].encode("utf-8")).hexdigest()
+            roll = int(digest[:8], 16) % 10
+            if whitelist and roll < 8:
+                return "open_app", _pick(whitelist, activity["activity_id"])
+            return ("press_home" if roll % 2 == 0 else "press_back"), None
+        return "look", None
+
+    def _save_screenshot(self, companion_id, activity_id, data: bytes) -> str:
+        directory = Path(self.policy.action_screenshot_dir)
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / f"{companion_id}_{activity_id}.png"
+        path.write_bytes(data)
+        return str(path)
+
+    def _execute_action(self, action, target, activity):
+        """Run one adb command and build the event payload. Never raises."""
+        serial = self.policy.action_adb_serial
+        payload = {
+            "activity_id": activity["activity_id"],
+            "kind": activity["kind"],
+            "action": action,
+            "target": target or serial,
+            "serial": serial,
+        }
+        try:
+            if action in ("press_home", "press_back"):
+                keyevent = "3" if action == "press_home" else "4"
+                result = _adb_run(["adb", "-s", serial, "shell", "input", "keyevent", keyevent])
+                payload["outcome"] = "ok" if result.returncode == 0 else "failed"
+                if result.returncode != 0:
+                    payload["detail"] = _stderr_text(result)
+                return payload
+            if action == "open_app":
+                if target not in self.policy.action_open_app_whitelist:
+                    logger.warning("Inner action refused non-whitelisted package %s", target)
+                    payload["outcome"] = "refused"
+                    payload["reason"] = "package_not_in_whitelist"
+                    return payload
+                result = _adb_run(
+                    [
+                        "adb",
+                        "-s",
+                        serial,
+                        "shell",
+                        "monkey",
+                        "-p",
+                        target,
+                        "-c",
+                        "android.intent.category.LAUNCHER",
+                        "1",
+                    ]
+                )
+                payload["outcome"] = "ok" if result.returncode == 0 else "failed"
+                if result.returncode != 0:
+                    payload["detail"] = _stderr_text(result)
+                return payload
+            result = _adb_run(["adb", "-s", serial, "exec-out", "screencap", "-p"])
+            if result.returncode != 0 or not result.stdout.startswith(_PNG_MAGIC):
+                payload["outcome"] = "failed"
+                payload["detail"] = _stderr_text(result)
+                return payload
+            path = self._save_screenshot(
+                activity["companion_id"], activity["activity_id"], result.stdout
+            )
+            payload["outcome"] = "ok"
+            payload["screenshot_path"] = path
+            payload["screenshot_bytes"] = len(result.stdout)
+            foreground = _foreground_app(serial)
+            if foreground:
+                payload["foreground_app"] = foreground
+            return payload
+        except Exception as error:  # pragma: no cover - defensive
+            logger.warning("Inner action %s failed: %s", action, error)
+            payload["outcome"] = "failed"
+            payload["detail"] = str(error)[:200]
+            return payload
+
+    def _maybe_action(self, companion_id, now):
+        """Look/act on the emulator when gates pass; silent on any failure."""
+        if not self.policy.action_enabled:
+            return None
+        if not self.policy.action_adb_serial:
+            return None
+        try:
+            with self.store.transaction() as connection:
+                activity = self._action_gates(connection, companion_id, now)
+                if activity is None:
+                    return None
+                activity = dict(activity)
+                activity["companion_id"] = companion_id
+                if not _adb_device_online(self.policy.action_adb_serial):
+                    logger.debug(
+                        "Inner action skipped: adb serial %s not online",
+                        self.policy.action_adb_serial,
+                    )
+                    return None
+            action, target = self._choose_action(activity)
+            payload = self._execute_action(action, target, activity)
+            event = None
+            with self.store.transaction(write=True) as connection:
+                event = self.coordinator._emit(
+                    connection,
+                    self.personality._now(),
+                    _ACTION_EVENT,
+                    payload,
+                    companion_id=companion_id,
+                )
+            if event is not None:
+                self._remember_action(companion_id, payload, event.get("event_id"), activity)
+            return payload
+        except Exception:
+            logger.exception("Inner action failed for %s", companion_id)
+            return None
+
+    def _remember_action(self, companion_id, payload, event_id, activity=None):
+        """Persist a completed inner action as a first-person episodic memory.
+
+        The line itself is model-written when the shared model channel is
+        attached (one short call, ledgered under the "inner_action_memory"
+        purpose); the deterministic template pool is only the fallback, so
+        repeated actions do not read as canned lines. Best effort: memory or
+        model failures never break the action pipeline, and everything happens
+        outside the action's write transaction.
+        """
+        if self.memory is None or event_id is None:
+            return None
+        outcome = payload.get("outcome")
+        if outcome not in ("ok", "failed"):
+            return None
+        if payload.get("action") == "look":
+            app = _app_label(payload.get("foreground_app"))
+        else:
+            app = _app_label(payload.get("target"))
+        key = f"{payload.get('action')}_{outcome}"
+        texts = _ACTION_MEMORY_TEMPLATES.get(key)
+        if not texts:
+            return None
+        model_line = self._action_memory_line(companion_id, payload, app, activity)
+        content = model_line or _pick(texts, event_id).format(app=app)
+        try:
+            return self.memory.write(
+                companion_id,
+                {
+                    "command_id": f"inner-action-{event_id[:80]}".lower(),
+                    "kind": "episode",
+                    "content": content,
+                    "source_event_id": event_id,
+                    "occurred_at": _timestamp(self.personality._now()),
+                    "importance": 0.4,
+                    "confidence": 1.0,
+                    "tags": ["inner_action", "model_v1" if model_line else "rules_v1"],
+                },
+            )
+        except Exception:
+            logger.warning("Inner action memory write failed for %s", companion_id, exc_info=True)
+            return None
+
+    def _action_memory_line(self, companion_id, payload, app, activity=None):
+        """Ask the shared model for one first-person memory line; None on any
+        failure so the caller falls back to the template pool."""
+        if self.provider is None or not self.model_name or not self.policy.model_assisted:
+            return None
+        action = payload.get("action")
+        outcome = payload.get("outcome")
+        if action == "look":
+            seen = _app_label(payload.get("foreground_app"))
+            action_text = (
+                f"看了一眼手机屏幕（截屏成功，当时前台是{seen}）"
+                if payload.get("foreground_app")
+                else "看了一眼手机屏幕（截屏成功）"
+            )
+        else:
+            action_text = f"在手机上打开了 {app}"
+        if outcome != "ok":
+            action_text += "，但没有成功"
+            mood = ""
+        try:
+            state = self.personality.get_state(companion_id)
+            mood = state.get("state", {}).get("mood") or ""
+        except Exception:
+            mood = ""
+        prompt = (
+            "任务：把你刚做出的一段动作写成一句第一人称记忆，像在心里对自己记下这件事。\n"
+            f"动作：{action_text}\n"
+            f"当时的内心活动：{(activity or {}).get('content') or '（无）'}\n"
+            f"此刻心情：{mood or '平静'}\n"
+            "要求：中文口语，一句话，不超过40个字；只写这一个动作带来的感受或印象，"
+            "不编造动作以外的细节，不称呼任何人，不输出引号或解释。只输出这句话本身。"
+        )
+        task_id = "actionmem-" + (payload.get("activity_id") or "ad-hoc")[-40:]
+        try:
+            estimated = estimate_chat_input_tokens(
+                self.memory.token_estimator, prompt, purpose=_ACTION_MEMORY_PURPOSE
+            )
+            hold = self.memory.reserve_model_tokens(
+                companion_id,
+                {
+                    "task_id": task_id,
+                    "purpose": _ACTION_MEMORY_PURPOSE,
+                    "input_tokens": estimated,
+                    "output_tokens": _ACTION_MEMORY_OUTPUT_TOKENS,
+                },
+            )
+            if not hold["new_reservation"]:
+                return None
+            request = ModelRequest(
+                task_id=task_id,
+                companion_id=companion_id,
+                purpose=_ACTION_MEMORY_PURPOSE,
+                model=self.model_name,
+                context_text=prompt,
+                input_token_limit=estimated,
+                output_token_limit=_ACTION_MEMORY_OUTPUT_TOKENS,
+            )
+            answer = self.provider.complete(request)
+        except MemoryError:
+            return None
+        except ProviderError as exc:
+            if exc.usage is not None:
+                self.memory.settle_model_tokens(
+                    companion_id,
+                    task_id,
+                    {
+                        "input_tokens": exc.usage.input_tokens,
+                        "output_tokens": exc.usage.output_tokens,
+                    },
+                )
+            elif exc.releasable:
+                self.memory.release_model_tokens(companion_id, task_id)
+            return None
+        except Exception:
+            return None
+        usage = getattr(answer, "usage", None)
+        if (
+            usage is None
+            or not isinstance(usage.input_tokens, int)
+            or not isinstance(usage.output_tokens, int)
+        ):
+            return None
+        self.memory.settle_model_tokens(
+            companion_id,
+            task_id,
+            {"input_tokens": usage.input_tokens, "output_tokens": usage.output_tokens},
+        )
+        line = (answer.text or "").strip().strip("「」\"'“” \n")
+        if not line or len(line) > 80 or "\n" in line or ":" in line[:2]:
+            return None
+        return line
 
     def _prune(self, connection, companion_id):
         connection.execute(

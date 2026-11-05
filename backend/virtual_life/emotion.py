@@ -2,16 +2,22 @@
 
 import hashlib
 import json
+import logging
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from typing import Literal
 
-from pydantic import Field, model_validator
+from pydantic import Field, ValidationError, model_validator
 
-from .emotion_appraisal import AppraisalVector, appraise
+from .emotion_appraisal import AppraisalVector, _project, appraise
 from .memory import MemoryError
+from .model_provider import estimate_chat_input_tokens
 from .models import Identifier, RequestModel, Version
 from .personality import PersonalityError, PersonalityState, _json, _timestamp
+from .ports import ModelRequest
 from .responses import MemorySourceVersion
+
+_LOGGER = logging.getLogger(__name__)
 
 
 class EmotionPolicy(RequestModel):
@@ -29,6 +35,16 @@ class EmotionPolicy(RequestModel):
     negative_half_life_seconds: int | None = Field(default=None, ge=60, le=7200)
     candidate_limit: int = Field(default=256, ge=1, le=2048)
     resonance_strength: float = Field(default=0.2, ge=0, le=0.3)
+    # Model-assisted appraisal: when enabled AND a provider is attached, the
+    # appraise() entry point is wrapped by EmotionService.observe to try the
+    # model first (strict JSON, bounded by the timeout below) and fall back
+    # to the local rules on failure, timeout, or invalid output. The appraise
+    # function itself stays pure and rule-based.
+    appraise_model_enabled: bool = False
+    # Optional per-purpose model override for appraisal; empty keeps the shared [model].
+    appraise_model_name: str = Field(default="", max_length=256)
+    appraise_model_timeout_seconds: float = Field(default=2.0, gt=0, le=30)
+    appraise_model_output_tokens: int = Field(default=200, ge=1, le=1_000)
 
 
 class Affect(RequestModel):
@@ -64,6 +80,7 @@ Reason = Literal[
     "explicit_distress",
     "explicit_question",
     "quiet_request",
+    "model_v1",
 ]
 
 # Reactions whose experiences decay more slowly when negative_half_life_seconds
@@ -190,10 +207,17 @@ class EmotionService:
         self.personality = personality
         self.memory = memory
         self.policy = policy or EmotionPolicy()
+        self.provider = None
+        self.model_name = ""
         self.store = personality.store
         with self.store.transaction(write=True) as connection:
             for statement in _SCHEMA:
                 connection.execute(statement)
+
+    def attach_model(self, provider, model_name: str) -> None:
+        """Attach the shared model channel used for appraise_model_enabled."""
+        self.provider = provider
+        self.model_name = model_name or ""
 
     @staticmethod
     def _row(connection, companion_id):
@@ -231,13 +255,213 @@ class EmotionService:
             "SELECT 1 FROM emotion_experiences WHERE event_id=?", (event["event_id"],)
         ).fetchone():
             return
-        appraisal = appraise(event["payload"]["user_message"], profile["definition"]["traits"])
+        appraisal = self._appraise(event, profile, now, connection=connection)
         connection.execute(
             """INSERT INTO emotion_experiences
             (event_id, companion_id, appraisal_json, created_at) VALUES (?, ?, ?, ?)""",
             (event["event_id"], event["companion_id"], _json(appraisal), _timestamp(now)),
         )
         self._bump(connection, event["companion_id"], event["event_id"], now)
+
+    _EMOTION_MODEL_PURPOSE = "emotion_appraise"
+    _REACTIONS = (
+        "neutral",
+        "joy",
+        "concern",
+        "curiosity",
+        "quiet",
+        "amusement",
+        "excitement",
+        "surprise",
+        "sympathy",
+        "annoyance",
+        "pride",
+    )
+    _ATTRIBUTIONS = ("self", "other", "situation", "unspecified")
+
+    def _appraise(self, event, profile, now, *, connection=None):
+        """Local rules first, model refinement when enabled and attached.
+
+        The model path returns None on any failure (quota, timeout, invalid
+        JSON) and observe then uses the rule result, so emotion never breaks
+        a dialogue turn because the model channel hiccuped.
+        """
+        local = appraise(event["payload"]["user_message"], profile["definition"]["traits"])
+        if not self.policy.appraise_model_enabled:
+            return local
+        if self.provider is None or not self.model_name:
+            _LOGGER.info(
+                "emotion appraise model gate: provider=%s model_name=%r",
+                self.provider,
+                self.model_name,
+            )
+            return local
+        refined = None
+        try:
+            refined = self._appraise_with_model(event, profile, connection=connection)
+        except Exception as exc:  # noqa: BLE001 - diagnose silent model fallbacks
+            _LOGGER.warning("emotion appraise model failed: %r", exc)
+            refined = None
+        if refined is None:
+            _LOGGER.info(
+                "emotion appraise model skipped/failed; using local rules (provider=%s model=%s)",
+                self.provider is not None,
+                self.model_name,
+            )
+        return refined if refined is not None else local
+
+    def _appraise_with_model(self, event, profile, *, connection=None):
+        message = event["payload"]["user_message"]
+        traits = profile["definition"]["traits"]
+        prompt = (
+            "You appraise the emotional reaction of a companion to ONE user "
+            "message. Judge only from the message text and the traits.\n"
+            f"traits: {json.dumps(traits, ensure_ascii=False, default=str)}\n"
+            f"user message: {message!r}\n"
+            f"reaction must be one of: {', '.join(self._REACTIONS)}\n"
+            "appraisal fields (each -1..1): pleasantness, effort, attention, "
+            "agency, uncertainty, control\n"
+            "Return STRICT JSON only, no markdown fence, no extra keys:\n"
+            '{"reaction": "...", "confidence": 0.0, "uncertainty": 0.0, '
+            '"attribution": "self|other|situation|unspecified", "appraisal": '
+            '{"pleasantness": 0.0, "effort": 0.0, "attention": 0.0, '
+            '"agency": 0.0, "uncertainty": 0.0, "control": 0.0}, '
+            '"rationale": "one short sentence"}'
+        )
+        companion_id = event["companion_id"]
+        task_id = "emo-" + event["event_id"]
+        estimated = estimate_chat_input_tokens(
+            self.memory.token_estimator, prompt, purpose=self._EMOTION_MODEL_PURPOSE
+        )
+        try:
+            hold = self.memory.reserve_model_tokens(
+                companion_id,
+                {
+                    "task_id": task_id,
+                    "purpose": self._EMOTION_MODEL_PURPOSE,
+                    "input_tokens": estimated,
+                    "output_tokens": self.policy.appraise_model_output_tokens,
+                },
+                **({"via": connection} if connection is not None else {}),
+            )
+        except MemoryError:
+            return None
+        if not hold["new_reservation"]:
+            return None
+        request = ModelRequest(
+            task_id=task_id,
+            companion_id=companion_id,
+            purpose=self._EMOTION_MODEL_PURPOSE,
+            model=self.model_name,
+            context_text=prompt,
+            input_token_limit=estimated,
+            output_token_limit=self.policy.appraise_model_output_tokens,
+        )
+        answer = None
+        try:
+            # Bounded wait: the observe call sits on the dialogue accept path,
+            # so a slow provider must not stall the turn. The worker thread is
+            # abandoned (not joined) on timeout; it settles or releases on its
+            # own completion path via the usage handling below only when it
+            # returns in time — otherwise the reservation is released here.
+            executor = ThreadPoolExecutor(max_workers=1)
+            try:
+                future = executor.submit(self.provider.complete, request)
+                answer = future.result(timeout=self.policy.appraise_model_timeout_seconds)
+            finally:
+                executor.shutdown(wait=False)
+        except Exception:
+            self.memory.release_model_tokens(
+                companion_id, task_id, **({"via": connection} if connection is not None else {})
+            )
+            return None
+        usage = getattr(answer, "usage", None)
+        if (
+            usage is None
+            or not isinstance(usage.input_tokens, int)
+            or not isinstance(usage.output_tokens, int)
+        ):
+            self.memory.release_model_tokens(
+                companion_id, task_id, **({"via": connection} if connection is not None else {})
+            )
+            return None
+        self.memory.settle_model_tokens(
+            companion_id,
+            task_id,
+            {"input_tokens": usage.input_tokens, "output_tokens": usage.output_tokens},
+            **({"via": connection} if connection is not None else {}),
+        )
+        return self._parse_model_appraisal(answer.text, traits)
+
+    @staticmethod
+    def _parse_model_payload(text):
+        payload = text.strip()
+        if payload.startswith("```"):
+            payload = payload.strip("`")
+        try:
+            return json.loads(payload)
+        except ValueError:
+            start, end = payload.find("{"), payload.rfind("}")
+            if start < 0 or end <= start:
+                return None
+            try:
+                return json.loads(payload[start : end + 1])
+            except ValueError:
+                return None
+
+    def _parse_model_appraisal(self, text, traits):
+        if not text:
+            return None
+        parsed = self._parse_model_payload(text)
+        if parsed is None:
+            _LOGGER.info(
+                "emotion appraise model output unparseable: %r",
+                text[:200],
+            )
+            return None
+        if not isinstance(parsed, dict):
+            return None
+        reaction = parsed.get("reaction")
+        if reaction not in self._REACTIONS:
+            _LOGGER.info(
+                "emotion appraise model reaction %r not in enum",
+                reaction,
+            )
+            return None
+        appraisal = parsed.get("appraisal")
+        if not isinstance(appraisal, dict):
+            return None
+        try:
+            vector = AppraisalVector.model_validate(appraisal)
+        except ValidationError:
+            _LOGGER.info(
+                "emotion appraise model appraisal fields invalid: %r",
+                appraisal,
+            )
+            return None
+        confidence = parsed.get("confidence", 0.5)
+        try:
+            confidence = min(1.0, max(0.0, float(confidence)))
+        except (TypeError, ValueError):
+            confidence = 0.5
+        uncertainty = parsed.get("uncertainty", vector.uncertainty)
+        try:
+            uncertainty = min(1.0, max(0.0, float(uncertainty)))
+        except (TypeError, ValueError):
+            uncertainty = vector.uncertainty
+        attribution = parsed.get("attribution", "unspecified")
+        if attribution not in self._ATTRIBUTIONS:
+            attribution = "unspecified"
+        return {
+            "reaction": reaction,
+            "reason": "model_v1",
+            "confidence": confidence,
+            "delta": _project(vector, reaction, traits),
+            "appraisal": vector.model_dump(),
+            "appraisal_version": "model_v1",
+            "uncertainty": uncertainty,
+            "attribution": attribution,
+        }
 
     @staticmethod
     def _forgotten(connection, companion_id, event_id):

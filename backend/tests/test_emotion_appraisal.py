@@ -128,6 +128,33 @@ def test_thanks_punctuation_and_english_are_supported_without_broad_substrings()
     assert appraise("我很好奇为什么我今天很难过", TRAITS)["reaction"] == "curiosity"
 
 
+@pytest.mark.parametrize(
+    "message,expect",
+    [
+        ("今天好累啊，不想动", "concern"),
+        ("这个题好难啊", "concern"),
+        ("你真逗，笑死我了", "amusement"),
+    ],
+)
+def test_inclusion_fallback_rescues_embedded_cues(message, expect):
+    result = appraise(message, TRAITS)
+    assert result["reaction"] == expect
+    assert result["appraisal_version"] == "rules_v3"
+    assert 0.4 < result["confidence"] < 0.6
+    assert result["confidence"] < appraise("我今天很难过", TRAITS)["confidence"]
+
+
+@pytest.mark.parametrize(
+    "message",
+    ["我一点都不累", "她今天很累", "我很难过吗"],
+)
+def test_inclusion_fallback_guards_stay_conservative(message):
+    result = appraise(message, TRAITS)
+    assert result["reaction"] == "neutral"
+    assert result["reason"] == "no_explicit_cue"
+    assert result["confidence"] == 0
+
+
 def test_default_vector_is_neutral_and_complete():
     assert AppraisalVector().model_dump() == {
         "pleasantness": 0,

@@ -161,6 +161,15 @@ class MemoryLogService:
         finally:
             _CORRELATION.reset(token)
 
+    def current_command_id(self) -> str | None:
+        """Command id of the innermost active correlation, if any.
+
+        Callers use it to key short-lived caches so a cache entry written under
+        one dialogue command is never reused by another command (or by an
+        uncorrelated preview) even for an identical query.
+        """
+        return _CORRELATION.get()[0] or None
+
     def record(
         self,
         companion_id,

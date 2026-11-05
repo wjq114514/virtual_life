@@ -553,3 +553,34 @@ def test_openapi_and_capabilities_expose_inner_life(runtime):
     assert inner["generators"] == ["rules_v1"]
     assert inner["model_assisted"] is False
     assert capabilities["proactivity"]["origins"] == ["attention_boundary", "inner_activity"]
+
+
+def test_overnight_gap_resets_salience_in_daytime(runtime):
+    # A >=6h gap that ends in daytime is sleep, not lost interest: the
+    # salience should wake at the gentle morning factor instead of the
+    # ~1e-6 raw exponential after a full night.
+    client, app, clock, _, state = runtime
+    send(client, state, "wake-a", "今天聊到这儿，我去睡了")
+    clock.value += timedelta(minutes=20)
+    observe(client, clock)
+    app.state.inner_life.tick()
+
+    # 08:00 local + 26h -> 10:00 next day: daytime, well past the 6h sleep span.
+    clock.value += timedelta(hours=26)
+    data = client.get("/v1/companions/sui/inner-life").json()
+    assert data["salience"] > 0.3
+
+
+def test_long_gap_at_deep_night_still_decays(runtime):
+    # The overnight reset only applies to daytime: still awake deep at night,
+    # the old exponential fade keeps quieting a long-unmet impulse.
+    client, app, clock, _, state = runtime
+    send(client, state, "wake-b", "今天聊到这儿")
+    clock.value += timedelta(minutes=20)
+    observe(client, clock)
+    app.state.inner_life.tick()
+
+    # 08:00 local + 16h -> midnight local: deep night, gap >= 6h.
+    clock.value += timedelta(hours=16)
+    data = client.get("/v1/companions/sui/inner-life").json()
+    assert data["salience"] < 0.05

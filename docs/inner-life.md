@@ -75,6 +75,31 @@ GET /v1/companions/{companion_id}/inner-life/activities?after_sequence=0&limit=5
 | `model_output_token_limit` | 200 | 单次评判输出 token 上限 |
 | `model_min_confidence` | 0.55 | 接受模型结果的最低置信度 |
 | `model_weight` | 0.5 | 模型分数在混合结果中的权重 |
+| `action_enabled` | true* | 是否允许内心动作（需配置 adb serial） |
+| `action_adb_serial` | "" | 目标模拟器 adb serial（如 emulator-5554） |
+| `action_open_app_whitelist` | () | “做”动作允许打开的包名白名单 |
+| `action_min_interval_seconds` | 1800 | 两次内心动作的最小间隔 |
+| `action_daily_limit` | 8 | 每伙伴每日动作次数上限 |
+| `action_curious_min_salience` | 0.35 | 触发动作的最低 salience |
+| `action_screenshot_dir` | .data/inner_actions | 截屏落盘目录 |
+
+*action_enabled 策略默认为 true，但未配置 action_adb_serial 时不会执行任何动作。
+
+## 内心动作（实验性）
+
+当内心活动为 curious 或 restless 且 salience ≥ `action_curious_min_salience` 时，运行时可对本地 Android 模拟器执行一次“内心动作”：
+
+- **看（look）**：`adb -s SERIAL exec-out screencap -p` 截屏，PNG 落盘到 `action_screenshot_dir`（默认 `.data/inner_actions/`，文件名 `<companion_id>_<activity_id>.png`），路径与字节数写入事件载荷，供后续模型通道或屏幕分析引用。
+- **做（open_app）**：当活动为 restless 且白名单非空时，从 `action_open_app_whitelist` 按 activity_id 确定性选取一个包，`adb -s SERIAL shell monkey -p PKG -c android.intent.category.LAUNCHER 1` 启动。
+- **碰（press_home / press_back）**：restless 时约五分之一的动作是轻量的导航按键（`adb -s SERIAL shell input keyevent 3/4`），代替每次都启动应用——像顺手按了一下主页/返回键的"游荡"手势；白名单为空时 restless 只会执行这两种动作。
+
+门槛与安全边界：`action_enabled`、间隔 ≥ `action_min_interval_seconds`、当日次数 < `action_daily_limit`；每次动作前用 `adb devices` 确认 serial 在线，不在线则静默跳过（仅 debug 日志）。只允许白名单内的包名，不执行 root 命令，不删除任何数据；任何 adb 失败只记日志、绝不抛出，不影响对话与主流程。动作结果以事件 `companion.inner_action` 发出，载荷含 `activity_id`、`kind`、`action`、`target`、`serial`、`outcome`（ok/failed/refused），`look` 成功时附 `screenshot_path` 与 `screenshot_bytes`。执行入口为 `InnerLifeService.tick()` 后台轮询（`[inner_life] poll_seconds`）末尾的 `_maybe_action()`，adb 子命令超时 30 秒。
+
+配置四联动见 [配置](configuration.md)；`action_observer_node_id` 与 `action_analysis_wait_seconds` 预留给屏幕分析管道接入，当前执行路径未使用。
+
+动作记忆：`outcome` 为 ok 或 failed 的动作，在事件提交后（写事务之外）由 `_remember_action()` 写入一条第一人称的 episode 记忆（`command_id = inner-action-<event_id>`，tag `inner_action` + `model_v1`/`rules_v1`，importance 0.4，source_event_id 指向该动作事件），使伴侣“做过什么”能被后续对话回忆；`refused`（非白名单）属于管理性跳过，不写入记忆。记忆正文优先由共享模型通道生成（`_action_memory_line()`，prompt 带动作描述、当时的内心活动与当前 mood，要求一句不超过 40 字的第一人称，台账 purpose `inner_action_memory`、task_id `actionmem-<activity_id 后 40 位>`）；模型不可用、超预算或产出不合格时回退到 `_ACTION_MEMORY_TEMPLATES` 模板池。写入是尽力而为的：记忆或模型失败只记 warning，绝不影响动作管线。
+
+前台应用感知：`look` 动作在保存截屏后，会通过 `adb shell dumpsys activity activities` 的 `topResumedActivity` 行提取当前前台包名（正则 `topResumedActivity=(?:ComponentInfo\{)?<包名>/`，失败返回 None、不影响动作成败），写入事件 payload 的 `foreground_app`，并同步进入 `recent_action` 跟进上下文与动作记忆（记忆与独白里用中文友好标签，如 com.android.chrome→“浏览器”）。内心独白因此可以自然地“知道”刚才看屏幕时对方在哪个 app，而不做视觉细节的编造。
 
 ## 相关实现
 
