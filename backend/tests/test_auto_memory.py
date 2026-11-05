@@ -611,3 +611,60 @@ def test_external_reap_releases_reservation_after_deadline(tmp_path):
     with pytest.raises(MemoryError) as exc:
         auto.commit_external("sui", job_id, text, usage={"input_tokens": 20, "output_tokens": 10})
     assert exc.value.status_code == 409
+
+
+def episodes(memory):
+    with memory._connection() as connection:
+        return connection.execute(
+            "SELECT * FROM memory_records WHERE companion_id='sui' AND kind='episode' AND active=1 ORDER BY created_at"
+        ).fetchall()
+
+
+def test_episode_note_replaces_raw_transcript(tmp_path):
+    memory, auto, provider, clock = environment(tmp_path)
+    enqueue(
+        memory, auto, clock, "e1", "我今天去爬了山，有点累但是很开心", assistant="辛苦了，早点休息"
+    )
+    provider.output = {
+        "memories": [],
+        "summary": "他去爬山了，有点累但开心。",
+        "relations": [],
+        "episode_notes": [
+            {"source_event_id": "e1", "note": "他白天去爬了山，说有点累但很开心；我让他早点休息。"}
+        ],
+    }
+    auto.process_next()
+
+    rows = episodes(memory)
+    assert rows, "episode record missing"
+    assert rows[0]["content"] == "他白天去爬了山，说有点累但很开心；我让他早点休息。"
+    assert "User: " not in rows[0]["content"]
+    assert rows[0]["revision"] == 2
+    assert rows[0]["normalized_content"]
+
+
+def test_episode_note_with_unknown_source_is_dropped(tmp_path):
+    memory, auto, provider, clock = environment(tmp_path)
+    enqueue(memory, auto, clock, "e1", "我今天去爬了山", assistant="辛苦了")
+    provider.output = {
+        "memories": [],
+        "summary": "",
+        "relations": [],
+        "episode_notes": [{"source_event_id": "other-event", "note": "无关叙述"}],
+    }
+    auto.process_next()
+
+    rows = episodes(memory)
+    assert rows[0]["revision"] == 1
+    assert rows[0]["content"].startswith("User: ")
+
+
+def test_extraction_without_notes_keeps_transcript(tmp_path):
+    memory, auto, provider, clock = environment(tmp_path)
+    enqueue(memory, auto, clock, "e1", "我喜欢乌龙茶", assistant="记下了")
+    extract(provider, fact("e1", "我喜欢乌龙茶"), summary="用户喜欢乌龙茶")
+    auto.process_next()
+
+    rows = episodes(memory)
+    assert rows[0]["content"].startswith("User: ")
+    assert rows[0]["revision"] == 1
