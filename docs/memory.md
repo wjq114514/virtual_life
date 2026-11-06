@@ -119,3 +119,7 @@ app = create_app(
 自动记忆写入时按对话当时的情绪强度微调 importance（mood-congruent encoding）：对每个来源对话完成事件读取 `emotion_experiences` 中未失效的 appraisal delta，`intensity = min(1, |valence| + 0.5 * |arousal - 0.5|)`，`shift = EMOTION_IMPORTANCE_CAP(0.15) * intensity * sign(valence)`。正向情绪强化、负向情绪弱化（下限 0.05、上限 1.0），中性事件不动。
 
 只调制自动新插记忆的 importance；命中的 duplicate、冲突合并与用户手工写入不受影响。被调制的记录 tags 记入 `encoded_under_emotion` 与 `emotion:valence=…,arousal=…,shift=…` 供审计与后续修正。`emotion_experiences` 表缺失（纯 MemoryService 环境）时安全返回空映射，不报错。调节发生在 `_commit_output` 写事务内、插入之前，不额外调用模型。
+
+## 相识时长与生日倒计时（self age）
+
+对话 prepare 事务内会附加一条时间感注记：以 `companions.created_at` 计算今天是你们相识的第几天，作为纯事实注入提示（不规定如何提及）。若记忆里存在受保护的生日槽位事实（semantic_key 以 `birthday`/`birth_date`/`date_of_birth`/`生日`/`出生日期` 结尾的 fact），解析其中的月/日并在 30 天窗口内附上倒计时，当天则注明「今天是用户的生日」；更远的生日不注入，避免噪音。槽位事实不存在或日期不可解析时只保留相识时长一行。

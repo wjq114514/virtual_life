@@ -611,6 +611,7 @@ class DialogueService:
     # transaction.
     _ABSENCE_SECONDS = 3 * 86400
     _ABSENCE_NOTE_SECONDS = 2 * 3600
+    _SELF_AGE_BIRTHDAY_WINDOW_DAYS = 30
     _ABSENCE_REPAIR_SECONDS = 48 * 3600
 
     def _absence_reunion(
@@ -701,6 +702,68 @@ class DialogueService:
                 "——可以自然地带出这份牵挂，但不要逐字复述。"
             )
         return note
+
+    def _self_age_note(self, connection, companion_id: str, now: datetime) -> str | None:
+        """A plain time fact: how long this companion has existed, plus the
+        user's birthday countdown from a protected birthday-slot fact.
+
+        Facts only — the model decides how (or whether) to mention them.
+        """
+        row = connection.execute(
+            "SELECT created_at FROM companions WHERE companion_id=?", (companion_id,)
+        ).fetchone()
+        if row is None:
+            return None
+        created = _instant(row["created_at"])
+        days = max(0, (now - created).days)
+        parts = [
+            f"（时间感）你诞生于 {created.date().isoformat()}，"
+            f"今天是你们相识的第 {days + 1} 天；如果被问到年龄或认识多久，用这个事实，不要编造别的日期。"
+        ]
+        birthday = None
+        # Lazy import: auto_memory (via proactivity) imports dialogue at module
+        # level, so a top-level import here would be circular.
+        from .auto_memory import parse_birthday_month_day
+
+        for fact_row in connection.execute(
+            """SELECT semantic_key, content FROM memory_records
+            WHERE companion_id=? AND kind='fact' AND active=1
+            AND semantic_key IS NOT NULL
+            ORDER BY COALESCE(updated_at, created_at) DESC LIMIT 200""",
+            (companion_id,),
+        ).fetchall():
+            key = (fact_row["semantic_key"] or "").strip().lower()
+            suffixes = ("birthday", "birth_date", "date_of_birth", "生日", "出生日期")
+            hit = any(
+                key == suffix
+                or key.endswith(
+                    ("-" + suffix, "_" + suffix, ":" + suffix, "." + suffix, "/" + suffix)
+                )
+                for suffix in suffixes
+            )
+            if not hit:
+                continue
+            parsed = parse_birthday_month_day(fact_row["content"] or "")
+            if parsed is not None:
+                birthday = parsed
+                break
+        if birthday is not None:
+            month, day = birthday
+            today = now.date()
+            try:
+                candidate = today.replace(month=month, day=day)
+            except ValueError:
+                candidate = None
+            if candidate is not None:
+                if candidate == today:
+                    parts.append(f"今天是用户的生日（{month}月{day}日）。")
+                else:
+                    if candidate < today:
+                        candidate = today.replace(year=today.year + 1, month=month, day=day)
+                    remaining = (candidate - today).days
+                    if remaining <= self._SELF_AGE_BIRTHDAY_WINDOW_DAYS:
+                        parts.append(f"用户的生日是 {month}月{day}日，还有 {remaining} 天。")
+        return "\n".join(parts)
 
     def _proactive_reply_feedback(self, connection, companion_id: str, now: datetime) -> None:
         """Close the feedback loop when the user answers a proactive message.
@@ -923,6 +986,7 @@ class DialogueService:
                     if self.autobiography is not None
                     else None
                 )
+                self_age_note = self._self_age_note(connection, companion_id, self._now())
                 emotion = snapshots[2].get("emotion")
                 if (
                     not proactive
@@ -961,6 +1025,7 @@ class DialogueService:
                 slow_variables=slow,
                 inner_activity=inner,
                 absence_note=absence_note,
+                self_age_note=self_age_note,
                 autobiography_note=autobiography_note,
             )
             mark("preview_ms")
@@ -1006,6 +1071,7 @@ class DialogueService:
                     slow_variables=slow,
                     inner_activity=inner,
                     absence_note=absence_note,
+                    self_age_note=self_age_note,
                     autobiography_note=autobiography_note,
                 )
             mark("recall_ms")
@@ -1035,6 +1101,7 @@ class DialogueService:
                     slow_variables=slow,
                     inner_activity=inner,
                     absence_note=absence_note,
+                    self_age_note=self_age_note,
                     autobiography_note=autobiography_note,
                 )
             mark("resonance_ms")

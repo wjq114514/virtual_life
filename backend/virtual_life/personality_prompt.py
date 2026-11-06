@@ -671,6 +671,7 @@ class PersonalityPromptBuilder:
         inner_activity: InnerActivity | dict | None = None,
         absence_note: str | None = None,
         autobiography_note: str | None = None,
+        self_age_note: str | None = None,
     ) -> dict:
         request = self._validate(PersonalityPreview, payload, "payload")
         companion = self._validate(_CompanionPromptSnapshot, companion_snapshot, "companion")
@@ -837,6 +838,7 @@ class PersonalityPromptBuilder:
             autobiography_note.strip()
             if autobiography_note and autobiography_note.strip()
             else None,
+            self_age_note.strip() if self_age_note and self_age_note.strip() else None,
         ]
         current += "\n" + "\n".join(aside for aside in asides if aside)
         message = _data_block(
