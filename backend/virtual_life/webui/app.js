@@ -26,6 +26,7 @@ const VIEWS = {
   memories: { title: '记忆', sub: '记忆记录、摘要与自动记忆诊断', poll: 0 },
   graph: { title: '知识图谱', sub: '实体、关系与它们引用的证据', poll: 0 },
   inner: { title: '内心活动', sub: '情绪、需求与内心独白的时间线', poll: 5000 },
+  psychology: { title: '决策心理', sub: '主动消息决策时的心理快照与慢变量', poll: 5000 },
   devices: { title: '设备', sub: '节点、能力与在线状态', poll: 8000 },
 };
 
@@ -1743,6 +1744,180 @@ async function viewInner(host, gen) {
   every(VIEWS.inner.poll, load);
 }
 
+/* ============================================================ psychology */
+
+const DECISION_TONES = {
+  completed: 'ok',
+  running: 'info',
+  queued: 'info',
+  suppressed: 'warn',
+  silent: 'warn',
+  discarded: 'warn',
+  failed: 'warn',
+};
+
+const ORIGIN_LABELS = {
+  attention: '注意力',
+  inner: '内心',
+  schedule: '计划',
+  task: '任务',
+  ritual: '纪念日',
+};
+
+const STATUS_LABELS = {
+  completed: '已发出',
+  running: '发送中',
+  queued: '排队',
+  suppressed: '已抑制',
+  silent: '保持沉默',
+  discarded: '已丢弃',
+  failed: '失败',
+};
+
+const DAY_PART_LABELS = {
+  morning: '上午',
+  afternoon: '下午',
+  evening: '傍晚',
+  night: '夜间',
+  late_night: '深夜',
+};
+
+function psychologySnapshotBlock(decision) {
+  const p = decision.psychology;
+  if (!p) {
+    return h('div', { class: 'tl-text' }, '该决策未记录心理快照。');
+  }
+  const inner = p.inner || {};
+  const parts = [
+    h(
+      'div',
+      { class: 'chip-row', style: 'margin-bottom:8px' },
+      chip(`心境 ${p.mood || '—'}`, 'accent'),
+      chip(`时段 ${DAY_PART_LABELS[p.day_part] || p.day_part || '—'}`),
+      inner.kind ? chip(`内心 ${inner.kind}（${inner.trigger || '—'}）`, 'info') : null,
+    ),
+    h(
+      'div',
+      { class: 'metric-row' },
+      metric(num(p.energy, 2), '能量'),
+      metric(num(p.social_battery, 2), '社交电量'),
+      metric(num(p.valence, 2), '效价'),
+      metric(num(p.arousal, 2), '唤醒'),
+    ),
+    h(
+      'div',
+      { class: 'bars', style: 'margin-top:8px' },
+      barRow('冲动', inner.urge),
+      barRow('显著度', inner.salience),
+    ),
+  ];
+  return h('div', null, ...parts.filter(Boolean));
+}
+
+async function viewPsychology(host, gen) {
+  const id = S.companionId;
+  if (!id) {
+    host.appendChild(emptyState('没有可用的伙伴', '先在顶部选择一个伙伴。'));
+    return;
+  }
+
+  async function load() {
+    const [page, slow] = await Promise.all([
+      api(`/companions/${encodeURIComponent(id)}/proactivity/decisions?limit=30`),
+      api(`/companions/${encodeURIComponent(id)}/slow-variables`).catch(() => null),
+    ]);
+    if (gen !== S.gen) return;
+    paint(page, slow);
+  }
+
+  function paint(page, slow) {
+    clear(host);
+    const grid = h('div', { class: 'grid' });
+    const decisions = (page && page.decisions) || [];
+    // The API returns ascending order (oldest first).
+    const ordered = decisions.slice().reverse();
+    const latest = ordered[0];
+
+    grid.appendChild(
+      card(
+        '决策心理快照（为什么此刻开口）',
+        latest
+          ? h(
+              'div',
+              null,
+              h(
+                'div',
+                { class: 'chip-row', style: 'margin-bottom:10px' },
+                chip(STATUS_LABELS[latest.status] || latest.status, DECISION_TONES[latest.status]),
+                chip(ORIGIN_LABELS[latest.origin] || latest.origin, 'info'),
+                chip(`边界 ${latest.boundary || '—'}`),
+                h('span', null, fmtTime(latest.created_at, 'short')),
+              ),
+              h('div', { class: 'tl-text' }, latest.reason || '—'),
+              h('div', { style: 'margin-top:10px' }, psychologySnapshotBlock(latest)),
+            )
+          : emptyState('还没有决策记录', '主动消息经过一次去留决策后会出现在这里。'),
+        { className: 'span-2' },
+      ),
+    );
+
+    grid.appendChild(
+      card(
+        '慢变量',
+        slow
+          ? h(
+              'div',
+              null,
+              h('div', { class: 'chip-row', style: 'margin-bottom:10px' }, chip(`语气 ${slow.tone_hint || '—'}`, 'accent'), chip(`样本 ${slow.sample_size ?? '—'}`)),
+              h(
+                'div',
+                { class: 'bars' },
+                barRow('参与度', slow.engagement),
+                barRow('熟悉度', slow.familiarity),
+                barRow('关系温度', slow.relationship_warmth),
+              ),
+            )
+          : emptyState('慢变量不可用', '需要启用慢变量服务。'),
+      ),
+    );
+
+    grid.appendChild(
+      card(
+        '决策时间线',
+        decisions.length
+          ? h(
+              'div',
+              { class: 'timeline' },
+              ...ordered.map((decision) =>
+                h(
+                  'div',
+                  { class: `tl-item${decision === latest ? ' is-active' : ''}` },
+                  h(
+                    'div',
+                    { class: 'tl-head' },
+                    h('span', null, `#${decision.sequence}`),
+                    chip(STATUS_LABELS[decision.status] || decision.status, DECISION_TONES[decision.status]),
+                    chip(ORIGIN_LABELS[decision.origin] || decision.origin, 'info'),
+                    chip(decision.boundary || '—'),
+                    h('span', null, fmtTime(decision.created_at, 'short')),
+                  ),
+                  h('div', { class: 'tl-text' }, decision.reason || '—'),
+                  psychologySnapshotBlock(decision),
+                ),
+              ),
+            )
+          : emptyState('没有决策', '等第一条主动消息候选出现。'),
+        { className: 'span-all' },
+      ),
+    );
+
+    host.appendChild(grid);
+  }
+
+  await load();
+  every(VIEWS.psychology.poll, load);
+}
+
 function radarChart(labels, values) {
   const size = 240;
   const cx = size / 2;
@@ -1983,6 +2158,7 @@ const BUILDERS = {
   memories: viewMemories,
   graph: viewGraph,
   inner: viewInner,
+  psychology: viewPsychology,
   devices: viewDevices,
 };
 

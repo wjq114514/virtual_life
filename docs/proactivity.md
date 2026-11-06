@@ -255,3 +255,7 @@ Android 宿主同样需要在实际呈现前通过本地 OutputHandle/LeaseGate 
 升序排列，`next_sequence` 为本页最大 sequence（空页保留输入 cursor）。决策状态可原位更新，
 因此刷新最新面板应使用 `after_sequence=0,latest=true`，而非只追递增 cursor。
 决策页的 cursor 与实时文字页的 event sequence cursor 分开维护。
+
+## WebUI 决策心理面板
+
+`/ui/` 的「决策心理」视图消费 `GET /v1/companions/{id}/proactivity/decisions` 与 `/slow-variables`：最近 30 条决策的时间线（origin/boundary/status/reason）逐条展示 `psychology` 快照（mood、energy、social_battery、valence/arousal、内在活动 kind/trigger/urge/salience、day_part），并叠加慢变量（engagement/familiarity/relationship_warmth/tone_hint）。纯读取，无新增模型调用；旧决策行的 `psychology` 可能为 null，面板按「未记录」展示。
