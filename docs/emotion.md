@@ -58,6 +58,10 @@ effective[axis] = clamp(baseline[axis] + sum(valid_delta[axis] * factor[axis]))
 
 状态、版本、事件与幂等回执在同一事务保存。相同 command_id 与请求重放原回执；改变请求或使用过期 expected_revision 返回 409。伙伴之间的经历隔离，别的伙伴的经历返回 404。历史回执不授予当前输出权。
 
+## 缺席与重逢
+
+对话认领事务内，先于常规评价执行缺席检测：距上一条 `companion.dialogue_received`（排除当前事件）超过 3 天时，发出 `companion.absence` 事件（payload 含 days、gap_seconds、missed_activity=空窗期内 salience 最高的内心活动），并写入一条 reason=`absence_reunion` 的情绪体验——valence 下降 min(0.12, 0.02×days)、arousal 上升 min(0.10, 0.015×days)，均按天数封顶；按事件幂等，同一次重逢只记一次。缺席检测先于 `observe` 执行，保证后续评价把情绪账本锚回当前事件，输出闸门不受影响。空窗结束后 2 小时内的对话提示会附加一条重逢背景注记（含天数与印象最深的内心活动摘要），提示模型自然带出思念而非逐字复述；主动消息不参与该链路。
+
 ## 记忆共鸣与遗忘
 
 首次组装预算内提示后，从实际包括的 episode 来源中找回过去的情感经历。词法相关性还须达到阈值，纯向量相关暂不触发共鸣。同一原始经历被多个记忆引用也只计一次。共鸣采用有效情感增量均值乘 `resonance_strength`，不复制历史精力消耗。每个用户事件只评估一次，空结果也持久记录，随后重新组装有界提示。

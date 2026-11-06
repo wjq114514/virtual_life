@@ -669,6 +669,7 @@ class PersonalityPromptBuilder:
         host_allows_audio: bool = False,
         slow_variables: SlowVariableSnapshot | dict | None = None,
         inner_activity: InnerActivity | dict | None = None,
+        absence_note: str | None = None,
     ) -> dict:
         request = self._validate(PersonalityPreview, payload, "payload")
         companion = self._validate(_CompanionPromptSnapshot, companion_snapshot, "companion")
@@ -831,6 +832,7 @@ class PersonalityPromptBuilder:
             _tone_variant(companion.companion_id, personality.revision, request.user_message),
             rhythm_aside,
             vocabulary_aside,
+            absence_note.strip() if absence_note and absence_note.strip() else None,
         ]
         current += "\n" + "\n".join(aside for aside in asides if aside)
         message = _data_block(

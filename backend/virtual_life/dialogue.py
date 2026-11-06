@@ -601,6 +601,105 @@ class DialogueService:
     # surface, so settings/docs/example stay untouched.
     _PROACTIVE_REPLY_WINDOW_SECONDS = 6 * 3600
 
+    # A gap of at least this long between user dialogues reads as an absence:
+    # the reunion turn emits one ``companion.absence`` event (with the highest
+    # salience inner activity from the gap), adjusts emotion once, and injects
+    # an absence-aware note into the next few prompts while the reunion is
+    # still fresh. All rule-based: no model calls inside the dialogue
+    # transaction.
+    _ABSENCE_SECONDS = 3 * 86400
+    _ABSENCE_NOTE_SECONDS = 2 * 3600
+    _ABSENCE_REPAIR_SECONDS = 48 * 3600
+
+    def _absence_reunion(
+        self, connection, companion_id: str, node_id: str, received, now: datetime
+    ) -> None:
+        """Emit ``companion.absence`` and appraise the reunion, once per gap.
+
+        Called inside the claim transaction, right after the current
+        ``*_received`` event was emitted: the previous interaction is looked
+        up excluding that event. The deduplication window is the previous
+        interaction timestamp itself — an absence already recorded for this
+        span never fires twice.
+        """
+        row = connection.execute(
+            """SELECT occurred_at FROM events
+            WHERE companion_id=? AND type='companion.dialogue_received' AND event_id != ?
+            ORDER BY sequence DESC LIMIT 1""",
+            (companion_id, received["event_id"]),
+        ).fetchone()
+        if row is None:
+            return
+        last_text = row["occurred_at"]
+        last = _instant(last_text)
+        gap = (now - last).total_seconds()
+        if gap < self._ABSENCE_SECONDS:
+            return
+        dup = connection.execute(
+            """SELECT 1 FROM events
+            WHERE companion_id=? AND type='companion.absence' AND occurred_at > ?
+            LIMIT 1""",
+            (companion_id, last_text),
+        ).fetchone()
+        if dup is not None:
+            return
+        missed_row = connection.execute(
+            """SELECT content FROM inner_activities
+            WHERE companion_id=? AND created_at BETWEEN ? AND ?
+            ORDER BY salience DESC LIMIT 1""",
+            (companion_id, last_text, now.isoformat(timespec="microseconds")),
+        ).fetchone()
+        missed_activity = missed_row["content"] if missed_row is not None else None
+        days = gap / 86400.0
+        event = self.coordinator._emit(
+            connection,
+            now,
+            "companion.absence",
+            {
+                "days": days,
+                "gap_seconds": gap,
+                "missed_activity": missed_activity,
+            },
+            companion_id=companion_id,
+            node_id=node_id,
+            recipient_node_id=node_id,
+        )
+        if self.emotion_service is not None:
+            self.emotion_service.absence_reunion(
+                connection, companion_id, event["event_id"], now, days=days
+            )
+
+    def _absence_note(self, connection, companion_id: str, now: datetime) -> str | None:
+        """Build the reunion aside while the absence event is still fresh."""
+        row = connection.execute(
+            """SELECT payload_json, occurred_at FROM events
+            WHERE companion_id=? AND type='companion.absence'
+            ORDER BY sequence DESC LIMIT 1""",
+            (companion_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        occurred = _instant(row["occurred_at"])
+        if (now - occurred).total_seconds() >= self._ABSENCE_NOTE_SECONDS:
+            return None
+        try:
+            payload = json.loads(row["payload_json"]) if row["payload_json"] else {}
+        except json.JSONDecodeError:
+            payload = {}
+        days = payload.get("days")
+        missed = payload.get("missed_activity")
+        days_text = f"{days:.0f}" if isinstance(days, (int, float)) else "这些"
+        note = (
+            f"（重逢背景）你约 {days_text} 天没来，刚才你们重逢了：既想念又有一点委屈，"
+            "这段空窗让她的情绪略受影响，但不要刻意诉苦。"
+        )
+        if isinstance(missed, str) and missed.strip():
+            note += (
+                f"你不在的这段时间里，她印象最深的一段内心活动是：「{missed.strip()[:120]}」"
+                "——可以自然地带出这份牵挂，但不要逐字复述。"
+            )
+        return note
+
     def _proactive_reply_feedback(self, connection, companion_id: str, now: datetime) -> None:
         """Close the feedback loop when the user answers a proactive message.
 
@@ -766,6 +865,8 @@ class DialogueService:
                 node_id=request.node_id,
                 recipient_node_id=request.node_id,
             )
+            if not proactive:
+                self._absence_reunion(connection, companion_id, request.node_id, received, now)
             if self.emotion_service is not None and not proactive:
                 self.emotion_service.observe(connection, received, initial[1], now)
             if not proactive and self.tool_runtime is not None:
@@ -812,6 +913,9 @@ class DialogueService:
                     if self.inner_life is None
                     else self.inner_life.latest_activity(connection, companion_id, self._now())
                 )
+                absence_note = (
+                    None if proactive else self._absence_note(connection, companion_id, self._now())
+                )
                 emotion = snapshots[2].get("emotion")
                 if (
                     not proactive
@@ -849,6 +953,7 @@ class DialogueService:
                 output_permitted=True,
                 slow_variables=slow,
                 inner_activity=inner,
+                absence_note=absence_note,
             )
             mark("preview_ms")
             memory_retrieval = None
@@ -892,6 +997,7 @@ class DialogueService:
                     output_permitted=True,
                     slow_variables=slow,
                     inner_activity=inner,
+                    absence_note=absence_note,
                 )
             mark("recall_ms")
             if self.emotion_service is not None and not proactive:
@@ -919,6 +1025,7 @@ class DialogueService:
                     output_permitted=True,
                     slow_variables=slow,
                     inner_activity=inner,
+                    absence_note=absence_note,
                 )
             mark("resonance_ms")
             screen_images = ()

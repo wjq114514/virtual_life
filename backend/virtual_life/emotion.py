@@ -85,6 +85,7 @@ Reason = Literal[
     "proactive_unanswered",
     "loneliness_idle",
     "loneliness_neglect",
+    "absence_reunion",
 ]
 
 # Reactions whose experiences decay more slowly when negative_half_life_seconds
@@ -358,6 +359,47 @@ class EmotionService:
             "appraisal_version": "loneliness_v1",
             "uncertainty": 0.15,
             "attribution": attribution,
+        }
+        connection.execute(
+            """INSERT INTO emotion_experiences
+            (event_id, companion_id, appraisal_json, created_at) VALUES (?, ?, ?, ?)""",
+            (event_id, companion_id, _json(appraisal), _timestamp(now)),
+        )
+        self._bump(connection, companion_id, event_id, now)
+
+    def absence_reunion(self, connection, companion_id, event_id, now, *, days):
+        """Record the felt weight of a long absence, felt at reunion.
+
+        When the user comes back after a multi-day gap, the reunion carries
+        both relief and accumulated missing: valence dips slightly (the cost
+        of the gap itself) while arousal rises (seeing them again). Magnitudes
+        scale with ``days`` and are capped so a year away reads the same as a
+        fortnight. ``event_id`` is the ``companion.absence`` event, so each
+        gap is appraised at most once.
+        """
+        if not self.policy.enabled:
+            return
+        if connection.execute(
+            "SELECT 1 FROM emotion_experiences WHERE event_id=?", (event_id,)
+        ).fetchone():
+            return
+        days = max(float(days), 0.0)
+        delta = {
+            "valence": -min(0.12, 0.02 * days),
+            "arousal": min(0.10, 0.015 * days),
+            "control": 0.0,
+            "energy": 0.0,
+            "social_battery": 0.0,
+        }
+        appraisal = {
+            "reaction": "quiet",
+            "reason": "absence_reunion",
+            "confidence": 0.8,
+            "delta": delta,
+            "appraisal": {"uncertainty": 0.15, "days": days},
+            "appraisal_version": "absence_v1",
+            "uncertainty": 0.15,
+            "attribution": "situation",
         }
         connection.execute(
             """INSERT INTO emotion_experiences
