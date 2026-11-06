@@ -120,3 +120,7 @@ GET /v1/companions/{companion_id}/inner-life/activities?after_sequence=0&limit=5
 - 中断复核：`backend/virtual_life/proactivity_output.py`
 - 提示段：`backend/virtual_life/personality_prompt.py`
 - 测试：`backend/tests/test_inner_life.py`
+
+## 好奇学习（curiosity compounding）
+
+好奇不再是一次性的张望。`_maybe_action` 执行 `look` 并成功取到前台应用时，会在同一写事务里向 `curiosity_observations`（companion_id, app_label, seen_at）追加一条观察记录；72 小时窗口内同一应用被观察到至少 3 次（`_CURIOSITY_WINDOW_HOURS`、`_CURIOSITY_REPEAT_MIN`）后，好奇独白的生成链 `judgment.content → 回忆锚定 → 好奇学习 → 模板` 会在第三步产出「最近几次看过去你都在用{应用}，我有点好奇它哪里吸引你，等你想聊的时候可以讲讲。」——好奇从"看一眼"累积成"想知道你为什么总去那里"。观察本身只是感知记录：`peek()` 纯查询不落库，只有真实执行的 look 动作才计数；应用名走 `_app_label` 友好名映射（未知包名取末段）。没有达到重复阈值时保持通用模板，不硬凑。

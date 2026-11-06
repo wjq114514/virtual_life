@@ -103,6 +103,8 @@ _ACTION_FOLLOWUP_SECONDS = 3 * 3600
 # old, one of the most recent candidates is picked deterministically by the
 # activity_id, and only a short snippet is quoted so the monologue stays brief.
 _REMINISCE_MIN_AGE_DAYS = 7
+_CURIOSITY_WINDOW_HOURS = 72
+_CURIOSITY_REPEAT_MIN = 3
 _REMINISCE_CANDIDATES = 8
 _REMINISCE_SNIPPET_CHARS = 60
 # Look actions also record which app was in the foreground (from dumpsys, not
@@ -269,6 +271,12 @@ _SCHEMA = (
         expires_at TEXT NOT NULL)""",
     """CREATE INDEX IF NOT EXISTS inner_activity_companion
         ON inner_activities(companion_id, status, sequence DESC)""",
+    """CREATE TABLE IF NOT EXISTS curiosity_observations (
+        companion_id TEXT NOT NULL REFERENCES companions(companion_id),
+        app_label TEXT NOT NULL,
+        seen_at TEXT NOT NULL)""",
+    """CREATE INDEX IF NOT EXISTS curiosity_observation_companion
+        ON curiosity_observations(companion_id, seen_at DESC)""",
 )
 
 _TEMPLATES: dict[InnerActivityKind, tuple[InnerActivityTrigger, tuple[str, ...]]] = {
@@ -1202,6 +1210,32 @@ class InnerLifeService:
         snippet = first[:_REMINISCE_SNIPPET_CHARS]
         return f"想起一件旧事：{snippet}。当时的感觉还留着一点。"
 
+    def _curiosity_line(self, connection, kind, companion_id, now):
+        """Turn accumulated look-action observations into a learned question.
+
+        Only the rules path uses this (model judgments carry their own
+        content). Curiosity compounds: when the same foreground app was seen
+        at least _CURIOSITY_REPEAT_MIN times in the trailing window, the
+        curious monologue becomes a question about that app instead of a
+        generic template line. Observations come verbatim from the companion's
+        own look actions (never invented), stored as friendly app labels.
+        """
+        if kind != "curious":
+            return None
+        since = _timestamp(now - timedelta(hours=_CURIOSITY_WINDOW_HOURS))
+        row = connection.execute(
+            """SELECT app_label, COUNT(*) AS hits FROM curiosity_observations
+                WHERE companion_id=? AND seen_at>?
+                GROUP BY app_label ORDER BY hits DESC LIMIT 1""",
+            (companion_id, since),
+        ).fetchone()
+        if row is None or int(row["hits"]) < _CURIOSITY_REPEAT_MIN:
+            return None
+        return (
+            f"最近几次看过去你都在用{row['app_label']}，我有点好奇它哪里吸引你，"
+            "等你想聊的时候可以讲讲。"
+        )
+
     def _commit(self, connection, job, judgment, now):
         if not self.policy.enabled:
             return 0
@@ -1230,6 +1264,8 @@ class InnerLifeService:
             content = self._reminisce_line(
                 connection, kind, job["companion_id"], job["activity_id"], now
             )
+        if content is None:
+            content = self._curiosity_line(connection, kind, job["companion_id"], now)
         if content is None:
             content = _pick(texts, job["activity_id"])
         created_at = _timestamp(now)
@@ -1439,6 +1475,23 @@ class InnerLifeService:
                     payload,
                     companion_id=companion_id,
                 )
+                if (
+                    event is not None
+                    and payload.get("action") == "look"
+                    and payload.get("outcome") == "ok"
+                    and payload.get("foreground_app")
+                ):
+                    # Curiosity learning: keep the observation so repeated
+                    # foreground apps can later become a curious question.
+                    connection.execute(
+                        "INSERT INTO curiosity_observations (companion_id, app_label, seen_at)"
+                        " VALUES (?, ?, ?)",
+                        (
+                            companion_id,
+                            _app_label(payload["foreground_app"]),
+                            _timestamp(self.personality._now()),
+                        ),
+                    )
             if event is not None:
                 self._remember_action(companion_id, payload, event.get("event_id"), activity)
             return payload

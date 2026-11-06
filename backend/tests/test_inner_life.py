@@ -1,6 +1,7 @@
 """Deterministic inner activity, API reads and conservative proactive origin."""
 
 import json
+import types
 from datetime import timedelta
 
 import pytest
@@ -765,3 +766,112 @@ def test_reminisce_skips_recent_or_missing_episodes(model_runtime):
     # Episode is too recent: the generic reflective template is used instead.
     assert "想起一件旧事" not in current["content"]
     assert current["content"].strip()
+
+
+def _write_curiosity(app, companion, labels, clock):
+    with app.state.inner_life.store.transaction(write=True) as connection:
+        for label in labels:
+            connection.execute(
+                "INSERT INTO curiosity_observations (companion_id, app_label, seen_at)"
+                " VALUES (?, ?, ?)",
+                (companion, label, clock.value.isoformat()),
+            )
+
+
+def test_curious_monologue_learns_from_repeated_look_observations(model_runtime):
+    client, app, clock, provider, state = model_runtime
+    provider.judge = {
+        "kind": "curious",
+        "salience": 0.6,
+        "urge": 0.5,
+        "confidence": 0.9,
+        "rationale": "no content offered",
+    }
+    _write_curiosity(app, "sui", ["时钟", "时钟", "时钟"], clock)
+    send(client, state, "one", "谢谢")
+    provider.requests.clear()
+    clock.value += timedelta(minutes=20)
+    observe(client, clock)
+    assert app.state.inner_life.tick() == 1
+    current = client.get("/v1/companions/sui/inner-life").json()["current"]
+    assert "最近几次看过去你都在用时钟" in current["content"]
+
+
+def test_curious_monologue_stays_generic_below_repeat_threshold(model_runtime):
+    client, app, clock, provider, state = model_runtime
+    provider.judge = {
+        "kind": "curious",
+        "salience": 0.6,
+        "urge": 0.5,
+        "confidence": 0.9,
+        "rationale": "no content offered",
+    }
+    _write_curiosity(app, "sui", ["时钟", "时钟"], clock)
+    send(client, state, "one", "谢谢")
+    provider.requests.clear()
+    clock.value += timedelta(minutes=20)
+    observe(client, clock)
+    assert app.state.inner_life.tick() == 1
+    current = client.get("/v1/companions/sui/inner-life").json()["current"]
+    assert "最近几次看过去" not in current["content"]
+
+
+def test_look_action_records_curiosity_observation(monkeypatch, tmp_path):
+    clock = Clock()
+    service = inner_life_module.InnerLifeService.__new__(inner_life_module.InnerLifeService)
+    service.policy = InnerLifePolicy(
+        action_enabled=True, action_adb_serial="emu", action_open_app_whitelist=()
+    )
+    # Minimal store + coordinator wiring so the write transaction works.
+    from virtual_life.storage import SQLiteStore
+
+    service.store = SQLiteStore(str(tmp_path / "look.sqlite"))
+    with service.store.transaction(write=True) as connection:
+        for statement in inner_life_module._SCHEMA:
+            connection.execute(statement)
+    with service.store.transaction(write=True) as connection:
+        connection.execute(
+            "INSERT INTO companions (companion_id, name, revision, epoch,"
+            " activity_json, interaction_mode, context_json, memory_refs_json,"
+            " created_at, updated_at)"
+            " VALUES ('sui', 'Sui', 0, 0, '{}', 'chat', '{}', '[]', ?, ?)",
+            (clock.value.isoformat(), clock.value.isoformat()),
+        )
+    service.personality = types.SimpleNamespace(_now=lambda: clock.value)
+    service.coordinator = types.SimpleNamespace(
+        _emit=lambda connection, now, etype, payload, companion_id: {
+            "event_id": "evt_look_1",
+        }
+    )
+    service.memory = None
+    monkeypatch.setattr(inner_life_module, "_adb_device_online", lambda serial: True)
+    monkeypatch.setattr(
+        inner_life_module,
+        "_foreground_app",
+        lambda serial: "com.google.android.deskclock",
+    )
+    monkeypatch.setattr(
+        service,
+        "_execute_action",
+        lambda action, target, activity: {
+            "action": "look",
+            "outcome": "ok",
+            "foreground_app": "com.google.android.deskclock",
+        },
+    )
+    monkeypatch.setattr(service, "_remember_action", lambda *a, **k: None)
+    # Seed an active curious activity so _action_gates passes.
+    with service.store.transaction(write=True) as connection:
+        connection.execute(
+            "INSERT INTO inner_activities (activity_id, companion_id, kind, trigger,"
+            " content, salience, urge, context_version, generator, status, created_at,"
+            " expires_at) VALUES ('ina_test', 'sui', 'curious', 'curiosity', '好奇',"
+            " 0.8, 0.5, 'v1', 'rules_v1', 'active', ?, ?)",
+            (clock.value.isoformat(), (clock.value + timedelta(hours=1)).isoformat()),
+        )
+    assert service._maybe_action("sui", clock.value) is not None
+    with service.store.transaction(write=True) as connection:
+        row = connection.execute(
+            "SELECT app_label FROM curiosity_observations WHERE companion_id='sui'"
+        ).fetchone()
+    assert row is not None and row["app_label"] == "时钟"
