@@ -131,6 +131,8 @@ daily_limit 为 1..20，cooldown_seconds 为 30..86400，candidate_ttl_seconds �
 
 决策保留 source_event_id、node/epoch、policy_revision、有效期与 reason。常见 reason：disabled、waiting_for_user、focused、suspected_stuck、attention_unknown、attention_stale、meeting_or_sharing、user_away、user_interacting、cooldown、daily_limit、boundary_superseded、policy_changed。生成后丢弃时记录具体 discard_reason，如 proactivity_focused 或 lease_expired。
 
+每条决策同时冗余一份心理快照（`psychology` 字段，decisions API 与 `companion.proactivity_decided` 事件 payload 均携带）：当时的 mood、energy、social_battery、valence/arousal（情绪有效值）、内在活动 kind/trigger/urge/salience（若有），以及 rhythm day_part。快照是可解释性 courtesy 事实，读取失败时为 null，不影响任何 gate 判定。
+
 ## 对话、情感与呈现
 
 主动生成复用 DialogueService 的预算、记忆版本检查与节点输出 gate。内部请求 user_initiated=false，提示使用 PROACTIVE_CONTEXT_DATA，不产生虚构用户消息。原 `/dialogue` POST 仍只接受 user_initiated=true。

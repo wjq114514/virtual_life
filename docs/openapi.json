@@ -13864,6 +13864,18 @@
               }
             ],
             "title": "Finished At"
+          },
+          "psychology": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Psychology"
           }
         },
         "additionalProperties": false,

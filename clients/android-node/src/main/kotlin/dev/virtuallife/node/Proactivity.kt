@@ -2,6 +2,7 @@ package dev.virtuallife.node
 
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.JsonObject
 
 /** Host-supplied advisory signals. Unknown fields suppress proactive speech. */
 @Serializable
@@ -83,6 +84,8 @@ data class ProactivityDecision(
     @SerialName("source_activity_id") val sourceActivityId: String? = null,
     @SerialName("started_at") val startedAt: String? = null,
     @SerialName("finished_at") val finishedAt: String? = null,
+    /** Redundant psychological snapshot (mood/affect/inner urge/day part) captured at decision time. */
+    @SerialName("psychology") val psychology: JsonObject? = null,
 )
 
 @Serializable

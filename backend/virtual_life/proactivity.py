@@ -17,7 +17,7 @@ from .dialogue import DialogueError
 from .focus import FocusService
 from .models import Identifier
 from .personality import PersonalityError
-from .rhythm import day_part
+from .rhythm import day_part, rhythm_snapshot
 
 
 def _json(value):
@@ -203,6 +203,7 @@ class ProactivityDecision(BaseModel):
     scheduled_task_id: Identifier | None = None
     started_at: str | None = None
     finished_at: str | None = None
+    psychology: dict | None = None
 
 
 class ProactivityDecisionPage(BaseModel):
@@ -240,6 +241,7 @@ class ProactivityService:
                     created_at TEXT NOT NULL, expires_at TEXT NOT NULL,
                     origin TEXT NOT NULL DEFAULT 'attention',
                     source_activity_id TEXT,
+                    psychology TEXT,
                     scheduled_task_id TEXT,
                     started_at TEXT, finished_at TEXT)""",
                 """CREATE UNIQUE INDEX IF NOT EXISTS one_proactive_execution
@@ -301,6 +303,8 @@ class ProactivityService:
                 connection.execute(
                     "ALTER TABLE proactivity_candidates ADD COLUMN source_activity_id TEXT"
                 )
+            if "psychology" not in columns:
+                connection.execute("ALTER TABLE proactivity_candidates ADD COLUMN psychology TEXT")
             if "scheduled_task_id" not in columns:
                 connection.execute(
                     "ALTER TABLE proactivity_candidates ADD COLUMN scheduled_task_id TEXT"
@@ -1495,11 +1499,73 @@ class ProactivityService:
         except DomainError:
             return None
 
+    def _psychology(self, connection, companion_id, now):
+        """Redundant psychological snapshot recorded with every decision.
+
+        A decision row already records the machine's verdict (status/reason);
+        this captures *why now*: mood/energy/social battery, affect valence
+        and arousal, the current inner activity, and the day part. It is a
+        courtesy fact for review and replay — failures degrade to ``None``
+        and never gate or fail the decision itself.
+        """
+        snapshot: dict = {}
+        try:
+            p = self.dialogue.personality_service
+            profile = p._profile_snapshot(companion_id, p._profile_row(connection, companion_id))
+            state = p._state_snapshot(companion_id, p._state_row(connection, companion_id), now)
+            effective_state = state["state"]
+            if self.dialogue.emotion_service is not None:
+                emotion = self.dialogue.emotion_service.snapshot(
+                    connection, companion_id, profile, state, now
+                )
+                if emotion.get("enabled"):
+                    effective_state = emotion["effective_state"]
+            snapshot["mood"] = effective_state.get("mood")
+            snapshot["energy"] = effective_state.get("energy")
+            snapshot["social_battery"] = effective_state.get("social_battery")
+            snapshot["valence"] = effective_state.get("valence")
+            snapshot["arousal"] = effective_state.get("arousal")
+        except (DomainError, DialogueError, KeyError, ValueError, TypeError):
+            pass
+        try:
+            if self.inner_life is not None:
+                activity = self.inner_life.current(companion_id)
+                if activity is not None:
+                    snapshot["inner"] = {
+                        "kind": getattr(activity, "kind", None),
+                        "trigger": getattr(activity, "trigger", None),
+                        "urge": getattr(activity, "urge", None),
+                        "salience": getattr(activity, "salience", None),
+                    }
+        except (DomainError, DialogueError, ValueError, TypeError):
+            pass
+        try:
+            timezone_name = getattr(
+                getattr(self.inner_life, "policy", None), "rhythm_timezone", "UTC"
+            )
+            rhythm = rhythm_snapshot(now, timezone_name)
+            if rhythm:
+                snapshot["day_part"] = rhythm.get("day_part")
+        except (ValueError, TypeError):
+            pass
+        return snapshot or None
+
     def _decision(self, connection, row, status, reason, now):
         terminal = status not in ("queued", "running")
+        psychology = self._psychology(connection, row["companion_id"], now)
+        psychology_json = (
+            json.dumps(psychology, ensure_ascii=False, sort_keys=True) if psychology else None
+        )
         connection.execute(
-            "UPDATE proactivity_candidates SET status=?, reason=?, finished_at=? WHERE candidate_id=?",
-            (status, reason, _timestamp(now) if terminal else None, row["candidate_id"]),
+            "UPDATE proactivity_candidates SET status=?, reason=?, finished_at=?, psychology=? "
+            "WHERE candidate_id=?",
+            (
+                status,
+                reason,
+                _timestamp(now) if terminal else None,
+                psychology_json,
+                row["candidate_id"],
+            ),
         )
         self.coordinator._emit(
             connection,
@@ -1515,6 +1581,7 @@ class ProactivityService:
                 "source_activity_id": (
                     row["source_activity_id"] if "source_activity_id" in row.keys() else None
                 ),
+                "psychology": psychology,
             },
             companion_id=row["companion_id"],
             node_id=row["node_id"],
@@ -1532,8 +1599,14 @@ class ProactivityService:
             ).fetchall()
             if latest:
                 rows.reverse()
+            results = []
+            for row in rows:
+                item = dict(row)
+                psychology = item.pop("psychology", None)
+                item["psychology"] = json.loads(psychology) if psychology else None
+                results.append(item)
             return {
-                "decisions": [dict(row) for row in rows],
+                "decisions": results,
                 "next_sequence": rows[-1]["sequence"] if rows else after_sequence,
             }
 

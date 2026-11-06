@@ -1105,3 +1105,19 @@ def test_ritual_candidate_dispatches_with_context(runtime):
     )
     assert commit.status_code == 200
     assert commit.json()["status"] == "completed"
+
+
+def test_decision_records_psychology_snapshot(runtime):
+    # Even a suppressed decision explains *why now*: the row carries a
+    # redundant psychological snapshot (mood/energy/social battery, affect,
+    # inner activity, day part) alongside the machine reason.
+    observe(runtime)
+    item = decisions(runtime)[0]
+    assert item["reason"] == "disabled"
+    psychology = item["psychology"]
+    assert psychology is not None
+    for key in ("mood", "energy", "social_battery"):
+        assert key in psychology
+    page = runtime[0].get("/v1/events?limit=500").json()["events"]
+    decided = [e for e in page if e["type"] == "companion.proactivity_decided"]
+    assert decided and decided[-1]["payload"]["psychology"] is not None
