@@ -1501,9 +1501,7 @@ def create_app(
     )
     def create_calendar_mark(companion_id: str, body: CalendarMarkRequest):
         """Add a calendar mark like "05-20" with a short label."""
-        return proactivity.add_mark(
-            companion_id, body.command_id, body.month_day, body.label
-        )
+        return proactivity.add_mark(companion_id, body.command_id, body.month_day, body.label)
 
     @router.delete(
         "/companions/{companion_id}/calendar-marks/{mark_id}",

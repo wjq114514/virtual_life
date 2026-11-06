@@ -270,9 +270,7 @@ def _environment_value(name: str, kind: type) -> object:
             return parsed
         if get_origin(kind) in (tuple, list) or kind in (tuple, list):
             parsed = json.loads(value)
-            if not isinstance(parsed, list) or not all(
-                isinstance(item, str) for item in parsed
-            ):
+            if not isinstance(parsed, list) or not all(isinstance(item, str) for item in parsed):
                 raise ValueError
             return tuple(parsed)
         return kind(value)

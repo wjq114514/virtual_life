@@ -697,3 +697,71 @@ def test_peek_none_when_disabled_offline_or_unknown(monkeypatch):
         action_enabled=True, action_adb_serial="", action_open_app_whitelist=()
     )
     assert service.peek() is None  # no serial
+
+
+def _source_event(client):
+    events = client.get("/v1/events?limit=500").json()["events"]
+    for event in reversed(events):
+        if event.get("companion_id") == "sui":
+            return event["event_id"]
+    raise AssertionError("no sui event found")
+
+
+def test_reflective_monologue_anchors_on_old_episode(model_runtime):
+    client, app, clock, provider, state = model_runtime
+    send(client, state, "one", "谢谢你陪我读书")
+    old = (clock.value - timedelta(days=8)).isoformat()
+    app.state.memory.write(
+        "sui",
+        {
+            "command_id": "remin-1",
+            "kind": "episode",
+            "content": "User: 我养了一只猫叫团子。\nAssistant: 替我摸摸它。",
+            "source_event_id": _source_event(client),
+            "occurred_at": old,
+        },
+    )
+    provider.judge = {
+        "kind": "reflective",
+        "salience": 0.6,
+        "urge": 0.5,
+        "confidence": 0.9,
+        "rationale": "reflection without content",
+    }
+    provider.requests.clear()
+    clock.value += timedelta(minutes=20)
+    observe(client, clock)
+    assert app.state.inner_life.tick() == 1
+    current = client.get("/v1/companions/sui/inner-life").json()["current"]
+    assert current["kind"] == "reflective"
+    assert "想起一件旧事" in current["content"]
+    assert "团子" in current["content"]
+
+
+def test_reminisce_skips_recent_or_missing_episodes(model_runtime):
+    client, app, clock, provider, state = model_runtime
+    send(client, state, "one", "谢谢你陪我读书")
+    app.state.memory.write(
+        "sui",
+        {
+            "command_id": "remin-2",
+            "kind": "episode",
+            "content": "User: 我养了一只猫叫团子。\nAssistant: 替我摸摸它。",
+            "source_event_id": _source_event(client),
+        },
+    )
+    provider.judge = {
+        "kind": "reflective",
+        "salience": 0.6,
+        "urge": 0.5,
+        "confidence": 0.9,
+        "rationale": "reflection without content",
+    }
+    provider.requests.clear()
+    clock.value += timedelta(minutes=20)
+    observe(client, clock)
+    assert app.state.inner_life.tick() == 1
+    current = client.get("/v1/companions/sui/inner-life").json()["current"]
+    # Episode is too recent: the generic reflective template is used instead.
+    assert "想起一件旧事" not in current["content"]
+    assert current["content"].strip()

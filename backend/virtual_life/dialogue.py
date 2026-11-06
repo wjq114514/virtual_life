@@ -1006,7 +1006,7 @@ class DialogueService:
                     slow_variables=slow,
                     inner_activity=inner,
                     absence_note=absence_note,
-                        autobiography_note=autobiography_note,
+                    autobiography_note=autobiography_note,
                 )
             mark("recall_ms")
             if self.emotion_service is not None and not proactive:
@@ -1035,7 +1035,7 @@ class DialogueService:
                     slow_variables=slow,
                     inner_activity=inner,
                     absence_note=absence_note,
-                        autobiography_note=autobiography_note,
+                    autobiography_note=autobiography_note,
                 )
             mark("resonance_ms")
             screen_images = ()

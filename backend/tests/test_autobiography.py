@@ -88,7 +88,9 @@ def test_first_chapter_generated_from_episodes(tmp_path):
         attach_desktop(client)
         # No episodes yet: nothing to narrate.
         assert app.state.autobiography.process("sui") is None
-        insert_episode(app, client, "User: 我这周在准备考试，压力有点大。\nAssistant: 那我们慢慢来。", "a1")
+        insert_episode(
+            app, client, "User: 我这周在准备考试，压力有点大。\nAssistant: 那我们慢慢来。", "a1"
+        )
         result = app.state.autobiography.process("sui")
         assert result is not None and result["chapter_index"] == 1
         chapter = rows(database, "SELECT * FROM autobiography_chapters")
@@ -117,9 +119,7 @@ def test_source_correction_marks_chapter_dirty_and_rebuilds(tmp_path):
     memory = app.state.memory
     with TestClient(app, headers={"Authorization": "Bearer test"}) as client:
         attach_desktop(client)
-        insert_episode(
-            app, client, "User: 我养了一只猫叫团子。\nAssistant: 替我摸摸它。", "c1"
-        )
+        insert_episode(app, client, "User: 我养了一只猫叫团子。\nAssistant: 替我摸摸它。", "c1")
         fact = insert_fact(app, client, "我养的猫叫团子。", "c2")
         memory_id = fact["memory_id"]
         app.state.autobiography.process("sui")

@@ -27,6 +27,10 @@
 
 `urgency`（`urge`）是候选强度，不等于发言许可。`content` 是内部提示材料，真实对话提示会明确标注“这是你自己的内在活动，不是用户发言”。`model.rationale` 仅供审计，绝不进入后续提示。
 
+### 回忆锚定（reminisce）
+
+`reflective` 活动走本地模板路径时（规则直接产出、或模型评判未给出 `content`），独白会尝试锚定一条真实旧 episode：从 `memory_records` 取 `kind='episode'`、`active=1`、`COALESCE(occurred_at, updated_at)` 早于 7 天（`_REMINISCE_MIN_AGE_DAYS`）的最近至多 8 条（`_REMINISCE_CANDIDATES`），按 `activity_id` 哈希确定性选一条，剥离 `User:`/`Assistant:` 等前缀后截断 60 字（`_REMINISCE_SNIPPET_CHARS`），生成「想起一件旧事：……。当时的感觉还留着一点。」。片段逐字来自记忆记录、绝不改写；无合格旧 episode（太新、不存在或全空）时回退通用模板。其他 kind 不受影响。
+
 ### 可选模型评判
 
 `model_assisted=true` 且模型已配置时，服务至多每个 `model_min_interval_seconds` 调用一次评判，并受每日次数与 token 账本限制。模型只返回 `kind`、`salience`、`urge`、`confidence`、`rationale`；服务验证 schema、置信度与允许类型，再按 `model_weight` 与本地分数混合。模型看到的最近对话被标记为不可信数据。调用不在 SQLite 写事务内执行，失败或无效输出自动使用本地结果。

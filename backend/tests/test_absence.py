@@ -107,7 +107,9 @@ def test_seven_day_gap_reunion_event_and_emotion(tmp_path, runtime):
         app.state.settings.database_path,
         "SELECT appraisal_json FROM emotion_experiences",
     )
-    reunion = [row for row in reasons if json.loads(row["appraisal_json"])["reason"] == "absence_reunion"]
+    reunion = [
+        row for row in reasons if json.loads(row["appraisal_json"])["reason"] == "absence_reunion"
+    ]
     assert len(reunion) == 1
     appraisal = json.loads(reunion[0]["appraisal_json"])
     delta = appraisal["delta"]

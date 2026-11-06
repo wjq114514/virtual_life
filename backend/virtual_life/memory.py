@@ -546,7 +546,9 @@ class MemoryService:
             connection.close()
 
     @contextmanager
-    def _tx(self, via: sqlite3.Connection | None = None, *, write: bool = False) -> Iterator[sqlite3.Connection]:
+    def _tx(
+        self, via: sqlite3.Connection | None = None, *, write: bool = False
+    ) -> Iterator[sqlite3.Connection]:
         """Run on an ambient transaction's connection when one is provided.
 
         Callers inside a storage.transaction() block pass their connection as
@@ -2094,7 +2096,12 @@ class MemoryService:
         return row
 
     def settle_model_tokens(
-        self, companion_id: str, task_id: str, payload: dict, *, via: sqlite3.Connection | None = None
+        self,
+        companion_id: str,
+        task_id: str,
+        payload: dict,
+        *,
+        via: sqlite3.Connection | None = None,
     ) -> dict:
         """Persist observed usage, including overruns and usage after a release."""
         companion_id = self._identifier(companion_id, "companion_id")

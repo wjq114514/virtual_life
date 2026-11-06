@@ -117,7 +117,13 @@ class AutobiographyService:
             row = connection.execute(
                 "SELECT revision, active FROM memory_records WHERE memory_id=?", (memory_id,)
             ).fetchone()
-            entries.append([memory_id, int(row["revision"]) if row else -1, bool(row["active"]) if row else False])
+            entries.append(
+                [
+                    memory_id,
+                    int(row["revision"]) if row else -1,
+                    bool(row["active"]) if row else False,
+                ]
+            )
         return json.dumps([personality_revision, entries], ensure_ascii=False, sort_keys=True)
 
     def current_chapter(self, connection, companion_id: str) -> dict | None:
@@ -131,7 +137,9 @@ class AutobiographyService:
         try:
             provenance = json.loads(row["provenance_json"])
             memory_ids = [item for item in provenance if isinstance(item, str)]
-            personality_revision = int(provenance[-1]) if provenance and isinstance(provenance[-1], int) else 0
+            personality_revision = (
+                int(provenance[-1]) if provenance and isinstance(provenance[-1], int) else 0
+            )
         except (ValueError, TypeError):
             memory_ids, personality_revision = [], 0
         if self._fingerprint(connection, memory_ids, personality_revision) != row["fingerprint"]:
@@ -172,9 +180,15 @@ class AutobiographyService:
             f"记住了 {len(facts)} 条稳定的事。"
         ]
         if facts:
-            parts.append("最近我在意的是：" + "；".join(row["content"].strip()[:40] for row in facts[:3]) + "。")
+            parts.append(
+                "最近我在意的是："
+                + "；".join(row["content"].strip()[:40] for row in facts[:3])
+                + "。"
+            )
         if count:
-            parts.append(f"这两周我的情绪整体偏{'轻松' if valence >= 0 else '沉静'}、{'起伏较大' if abs(arousal) >= 0.05 else '平稳'}。")
+            parts.append(
+                f"这两周我的情绪整体偏{'轻松' if valence >= 0 else '沉静'}、{'起伏较大' if abs(arousal) >= 0.05 else '平稳'}。"
+            )
         return "".join(parts)
 
     def _generate(self, companion_id, context, task_id) -> str | None:
@@ -206,7 +220,9 @@ class AutobiographyService:
         usage = (answer.usage.input_tokens, answer.usage.output_tokens)
         if any(type(count) is not int or not 0 <= count <= 1_000_000_000 for count in usage):
             return None
-        self.memory.settle_model_tokens(companion_id, task_id, {"input_tokens": usage[0], "output_tokens": usage[1]})
+        self.memory.settle_model_tokens(
+            companion_id, task_id, {"input_tokens": usage[0], "output_tokens": usage[1]}
+        )
         text = " ".join(answer.text.split())
         if not text or len(text) > 4000:
             return None
@@ -268,14 +284,18 @@ class AutobiographyService:
                     or 0
                 )
                 chapter_id = "abio_" + uuid.uuid4().hex
-                provenance = [row["memory_id"] for row in episodes] + [row["memory_id"] for row in facts]
+                provenance = [row["memory_id"] for row in episodes] + [
+                    row["memory_id"] for row in facts
+                ]
                 provenance.append(personality_revision)
                 fingerprint = self._fingerprint(
                     connection,
                     [row["memory_id"] for row in episodes] + [row["memory_id"] for row in facts],
                     personality_revision,
                 )
-                context = self._context(target, episodes, facts, emotion_stats, personality_revision, now)
+                context = self._context(
+                    target, episodes, facts, emotion_stats, personality_revision, now
+                )
                 break
         if target is None:
             return None

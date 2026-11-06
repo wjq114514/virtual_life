@@ -98,6 +98,13 @@ _ACTION_MEMORY_OUTPUT_TOKENS = 64
 # How long a completed action stays "recent" enough to color the next inner
 # monologue (the follow-up channel: "我刚才顺手…").
 _ACTION_FOLLOWUP_SECONDS = 3 * 3600
+# Reminiscence: a reflective moment may anchor itself on a real old episode
+# instead of a generic template line. The memory is at least this many days
+# old, one of the most recent candidates is picked deterministically by the
+# activity_id, and only a short snippet is quoted so the monologue stays brief.
+_REMINISCE_MIN_AGE_DAYS = 7
+_REMINISCE_CANDIDATES = 8
+_REMINISCE_SNIPPET_CHARS = 60
 # Look actions also record which app was in the foreground (from dumpsys, not
 # from the pixels themselves): the companion "glanced and saw the screen was on
 # X". Known packages get a friendly Chinese label; unknown ones fall back to
@@ -1164,6 +1171,37 @@ class InnerLifeService:
             },
         }
 
+    def _reminisce_line(self, connection, kind, companion_id, activity_id, now):
+        """Anchor a reflective monologue on a real old episode, or None.
+
+        Only the rules path uses this: a model judgment already carries its own
+        content. The snippet comes verbatim from memory_records (never invented),
+        is at least _REMINISCE_MIN_AGE_DAYS old, and is picked deterministically
+        from the most recent candidates by the activity_id hash.
+        """
+        if kind != "reflective":
+            return None
+        since = _timestamp(now - timedelta(days=_REMINISCE_MIN_AGE_DAYS))
+        rows = connection.execute(
+            """SELECT content FROM memory_records
+                WHERE companion_id=? AND kind='episode' AND active=1
+                    AND COALESCE(occurred_at, updated_at) < ?
+                ORDER BY COALESCE(occurred_at, updated_at) DESC
+                LIMIT ?""",
+            (companion_id, since, _REMINISCE_CANDIDATES),
+        ).fetchall()
+        if not rows:
+            return None
+        source = rows[int(hashlib.sha256(activity_id.encode()).hexdigest(), 16) % len(rows)]
+        first = (source["content"] or "").strip().splitlines()[0].strip()
+        for prefix in ("User:", "Assistant:", "你：", "我："):
+            if first.startswith(prefix):
+                first = first[len(prefix) :].strip()
+        if not first:
+            return None
+        snippet = first[:_REMINISCE_SNIPPET_CHARS]
+        return f"想起一件旧事：{snippet}。当时的感觉还留着一点。"
+
     def _commit(self, connection, job, judgment, now):
         if not self.policy.enabled:
             return 0
@@ -1187,7 +1225,13 @@ class InnerLifeService:
             return 0
         kind = judgment["kind"]
         trigger, texts = _TEMPLATES[kind]
-        content = judgment.get("content") or _pick(texts, job["activity_id"])
+        content = judgment.get("content")
+        if content is None:
+            content = self._reminisce_line(
+                connection, kind, job["companion_id"], job["activity_id"], now
+            )
+        if content is None:
+            content = _pick(texts, job["activity_id"])
         created_at = _timestamp(now)
         expires_at = _timestamp(now + timedelta(seconds=self.policy.activity_ttl_seconds))
         event = self.coordinator._emit(
