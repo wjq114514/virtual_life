@@ -21,6 +21,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from . import __version__, webui_session
 from .auto_memory import AutoMemoryService, GraphAliasUpdate
+from .autobiography import AutobiographyService
 from .coordinator import OUTPUT_CAPABILITIES, Coordinator, DomainError, RoutingPolicy
 from .delegation import DelegationExecutor, DelegationService
 from .dialogue import (
@@ -443,6 +444,12 @@ def create_app(
         external_timeout_seconds=settings.auto_memory_external_timeout_seconds,
     )
     memory.automatic_memory = automatic_memory
+    autobiography = AutobiographyService(
+        memory,
+        provider=provider,
+        model_name=settings.model_name,
+        enabled=bool(settings.model_name),
+    )
     vector_provider = embedding_provider
     if vector_provider is None and settings.embedding_base_url:
         vector_provider = CompatibleEmbeddingProvider(
@@ -498,6 +505,7 @@ def create_app(
         emotion_service=emotion,
         slow_variables=slow_variables,
         inner_life=inner_life,
+        autobiography=autobiography,
         screen_service=screen_vision,
         scene_classifier=scene_classifier,
         debounce_seconds=settings.dialogue_debounce_seconds,
@@ -674,6 +682,10 @@ def create_app(
                 await asyncio.to_thread(automatic_memory.process_next)
             except Exception:
                 logger.exception("Automatic memory processing failed")
+            try:
+                await asyncio.to_thread(autobiography.process)
+            except Exception:
+                logger.exception("Autobiography chapter generation failed")
             # Reclaim parked external jobs whose commit deadline passed so a
             # generator that dies mid-flight cannot hold a reservation forever.
             if settings.auto_memory_external:
@@ -809,7 +821,7 @@ def create_app(
         stop = asyncio.Event()
         memory_task = (
             asyncio.create_task(automatic_memory_loop(stop), name="automatic-memory")
-            if settings.auto_memory_enabled
+            if settings.auto_memory_enabled or bool(settings.model_name)
             else None
         )
         embedding_task = (
@@ -893,6 +905,7 @@ def create_app(
     app.state.linux_deployments = linux_deployments
     app.state.memory = memory
     app.state.automatic_memory = automatic_memory
+    app.state.autobiography = autobiography
     app.state.embeddings = embeddings
     app.state.personality = personality
     app.state.emotion = emotion

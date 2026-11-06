@@ -263,6 +263,7 @@ class DialogueService:
         emotion_service=None,
         slow_variables=None,
         inner_life=None,
+        autobiography=None,
         screen_service=None,
         model_router=None,
         scene_classifier=None,
@@ -289,6 +290,7 @@ class DialogueService:
         self.emotion_service = emotion_service
         self.slow_variables = slow_variables
         self.inner_life = inner_life
+        self.autobiography = autobiography
         self.screen_service = screen_service
         self.model_router = model_router
         self.scene_classifier = scene_classifier
@@ -916,6 +918,11 @@ class DialogueService:
                 absence_note = (
                     None if proactive else self._absence_note(connection, companion_id, self._now())
                 )
+                autobiography_note = (
+                    self.autobiography.note(connection, companion_id)
+                    if self.autobiography is not None
+                    else None
+                )
                 emotion = snapshots[2].get("emotion")
                 if (
                     not proactive
@@ -954,6 +961,7 @@ class DialogueService:
                 slow_variables=slow,
                 inner_activity=inner,
                 absence_note=absence_note,
+                autobiography_note=autobiography_note,
             )
             mark("preview_ms")
             memory_retrieval = None
@@ -998,6 +1006,7 @@ class DialogueService:
                     slow_variables=slow,
                     inner_activity=inner,
                     absence_note=absence_note,
+                        autobiography_note=autobiography_note,
                 )
             mark("recall_ms")
             if self.emotion_service is not None and not proactive:
@@ -1026,6 +1035,7 @@ class DialogueService:
                     slow_variables=slow,
                     inner_activity=inner,
                     absence_note=absence_note,
+                        autobiography_note=autobiography_note,
                 )
             mark("resonance_ms")
             screen_images = ()
