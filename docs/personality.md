@@ -191,3 +191,10 @@ HTTP 接口（所有者配置接口，复用 Bearer 身份，不需要输出租�
 | GET | `/v1/companions/{companion_id}/slow-variables` | 只读快照；读取不改写人格、情绪或记忆 |
 
 能力声明为 `personality.slow_variables`（`enabled`、`read_only=true`、`affects="prompt_and_participation"`、`policy`）。配置见[配置](configuration.md)。Android SDK 类型在 `SlowVariables.kt`，接入方法见 RuntimeApi 的 `getSlowVariables`。
+
+## 元认知（知道自己不知道）
+
+提示装配在记忆块之后附加一条「自我认知」注记，让陪伴者对自身记忆状态诚实：
+- 本次召回为空（也没有摘要）→ 明确提示「没有检索到相关可靠记忆：可以坦然说记不清、请用户再讲一次，不要编造细节」，把不知道说出口，而不是即兴编造共同经历。
+- 召回里有不确定的非 episode 记录（confidence < 0.6，或未确认的 fact/preference/relationship）→ 列出最多 3 条短摘要，提示提及时用「好像/我记得」的口吻或直接向用户求证，不要当成铁定事实。episode 豁免——情节记忆天然模糊，逐条对冲只会变成噪音。
+- 记忆都可靠时注记为空，零开销。注记受同一 token 预算约束，预算不足时静默丢弃。

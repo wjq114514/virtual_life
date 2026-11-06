@@ -328,6 +328,50 @@ def _dedupe_recall_items(items: list[dict]) -> list[dict]:
     return deduped
 
 
+_METACOGNITION_LOW_CONFIDENCE = 0.6
+_METACOGNITION_SNIPPET_CHARS = 40
+
+
+def _metacognition_aside(items: list[dict], summaries: list[dict]) -> str | None:
+    """Metacognition aside: the companion knows what it does not know.
+
+    Two honest states, both cheap plain text beside the memory block:
+    - uncertain recalled facts (confidence below the threshold, or an
+      unconfirmed non-episode record) → hedge ("好像/我记得") or ask the
+      user, never assert them as settled truth;
+    - nothing recalled at all → admit it and ask the user to retell,
+      instead of inventing shared history.
+    Episodes are exempt: episodic fuzziness is normal, hedging every one
+    would be noise.
+    """
+    uncertain = []
+    for item in items:
+        if item.get("kind") == "episode":
+            continue
+        confidence = float(item.get("confidence") or 0.0)
+        if confidence < _METACOGNITION_LOW_CONFIDENCE or not item.get("confirmed"):
+            uncertain.append(item)
+    if not items and not summaries:
+        return (
+            "（自我认知）这次没有检索到与话题相关的可靠记忆：可以坦然说记不清、"
+            "请用户再讲一次，不要编造细节。"
+        )
+    if uncertain:
+        snippets = []
+        for item in uncertain[:3]:
+            content = re.sub(r"\s+", "", item.get("content", ""))[:_METACOGNITION_SNIPPET_CHARS]
+            if content:
+                snippets.append(content)
+        if snippets:
+            listed = "；".join(snippets)
+            return (
+                "（自我认知）以下记忆你不太确定："
+                f"{listed}。提及时用「好像/我记得」的口吻或直接问用户确认，"
+                "不要当成铁定事实。"
+            )
+    return None
+
+
 def _memory_block(items: list[dict]) -> str:
     """MEMORY_DATA with an explicit one-shot reference note.
 
@@ -925,6 +969,12 @@ class PersonalityPromptBuilder:
                 time.monotonic() + _RECALL_THROTTLE_SECONDS,
                 recalled,
             )
+        # Metacognition aside is derived from the (deduplicated) recall result
+        # every time, so the throttled cache path stays identical to a fresh
+        # query.
+        metacognition_aside = _metacognition_aside(
+            recalled.get("items", []), recalled.get("summaries", [])
+        )
         selected_memories: list[dict] = []
         selected_versions: dict[str, int] = {}
         selected_entity_versions: dict[str, int] = {}
@@ -994,6 +1044,15 @@ class PersonalityPromptBuilder:
                     selected_entity_versions[reference["entity_id"]] = reference["revision"]
         # Recall's own `truncated` includes unselected database records and the
         # item limit. Preview truncation tracks only material dropped here.
+        # The metacognition aside is appended right after the memory block
+        # (subject to the same token budget) because it qualifies exactly
+        # those recalled items.
+        if metacognition_aside:
+            proposal = current + "\n" + metacognition_aside
+            if self._estimate(self._context(core, proposal, blocks, message)) <= (
+                request.token_budget
+            ):
+                current = proposal
 
         examples = {
             key: definition[key]

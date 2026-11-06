@@ -215,3 +215,54 @@ def test_deep_night_message_adds_woken_up_aside(monkeypatch):
     # Daytime (14:00 local) keeps the plain label.
     day = pp.rhythm_snapshot(real_datetime(2026, 1, 1, 6, 0, tzinfo=timezone.utc), "Asia/Shanghai")
     assert day["is_deep_night"] is False
+
+
+def test_metacognition_aside_admits_missing_memory():
+    from virtual_life.personality_prompt import _metacognition_aside
+
+    aside = _metacognition_aside([], [])
+    assert aside is not None
+    assert "没有检索到" in aside
+    assert "不要编造" in aside
+
+
+def test_metacognition_aside_flags_uncertain_facts():
+    from virtual_life.personality_prompt import _metacognition_aside
+
+    items = [
+        {
+            "kind": "fact",
+            "content": "喜欢抹茶味的蛋糕",
+            "confidence": 0.4,
+            "confirmed": 0,
+            "revision": 1,
+        },
+        {
+            "kind": "episode",
+            "content": "昨天一起看了猫",
+            "confidence": 0.3,
+            "confirmed": 0,
+            "revision": 1,
+        },
+    ]
+    aside = _metacognition_aside(items, [])
+    assert aside is not None
+    assert "喜欢抹茶味的蛋糕" in aside
+    assert "好像" in aside
+    # episodes are exempt from hedging: normal fuzziness, not doubt
+    assert "昨天一起看了猫" not in aside
+
+
+def test_metacognition_aside_silent_when_memory_is_solid():
+    from virtual_life.personality_prompt import _metacognition_aside
+
+    items = [
+        {
+            "kind": "fact",
+            "content": "喜欢乌龙茶",
+            "confidence": 0.9,
+            "confirmed": 1,
+            "revision": 2,
+        }
+    ]
+    assert _metacognition_aside(items, []) is None
