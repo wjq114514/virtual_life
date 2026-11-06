@@ -729,3 +729,55 @@ def test_no_emotion_experience_leaves_importance_untouched(tmp_path):
         ).fetchone()
     assert row["importance"] == 0.5
     assert json.loads(row["tags_json"]) == []
+
+
+def _enqueue_with_screen(memory, auto, clock, event_id, text, screen_context):
+    event = {
+        "event_id": event_id,
+        "type": "companion.dialogue_completed",
+        "companion_id": "sui",
+        "occurred_at": memory._timestamp(clock.value),
+        "payload": {
+            "user_message": text,
+            "assistant_message": "明白了",
+            "screen_context": screen_context,
+        },
+    }
+    with memory._connection(write=True) as connection:
+        connection.execute(
+            "INSERT INTO events(event_id,protocol_version,type,companion_id,payload_json,occurred_at) VALUES(?,'1',?,?,?,?)",
+            (event_id, event["type"], "sui", json.dumps(event["payload"]), event["occurred_at"]),
+        )
+        auto.enqueue(connection, event)
+    return event
+
+
+def test_episode_anchors_screen_context_observation(tmp_path):
+    memory, auto, provider, clock = environment(tmp_path)
+    _enqueue_with_screen(
+        memory, auto, clock, "e1", "看看这个页面", "购物车页面：3 件商品，合计 271 元"
+    )
+    extract(provider, fact("e1", "看看这个页面"))
+    result = auto.process_next("sui", force=True)
+    assert result["status"] == "completed"
+    with memory._connection() as connection:
+        row = connection.execute(
+            "SELECT content FROM memory_records"
+            " WHERE companion_id='sui' AND active=1 AND kind='episode'"
+        ).fetchone()
+    assert "Screen at the time (observation only):" in row["content"]
+    assert "购物车页面" in row["content"]
+
+
+def test_episode_without_screen_context_has_no_anchor(tmp_path):
+    memory, auto, provider, clock = environment(tmp_path)
+    enqueue(memory, auto, clock, "e1", "我喜欢乌龙茶")
+    extract(provider, fact("e1", "我喜欢乌龙茶"))
+    result = auto.process_next("sui", force=True)
+    assert result["status"] == "completed"
+    with memory._connection() as connection:
+        row = connection.execute(
+            "SELECT content FROM memory_records"
+            " WHERE companion_id='sui' AND active=1 AND kind='episode'"
+        ).fetchone()
+    assert "Screen at the time" not in row["content"]

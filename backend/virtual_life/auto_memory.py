@@ -656,6 +656,16 @@ class AutoMemoryService:
                         + "\nAssistant (dialogue behavior only): "
                         + payload["assistant_message"]
                     )
+                    # Multimodal anchor: the observation text of the screen the
+                    # user was looking at when the dialogue happened. Historic
+                    # events carry no screen_context, so nothing changes for
+                    # them (pure additive field).
+                    screen_anchor = payload.get("screen_context")
+                    if isinstance(screen_anchor, str) and screen_anchor.strip():
+                        content += (
+                            "\nScreen at the time (observation only): "
+                            + screen_anchor.strip()[:200]
+                        )
                     source = self._insert_memory(
                         connection,
                         companion_id,
