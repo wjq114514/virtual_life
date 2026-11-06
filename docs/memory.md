@@ -113,3 +113,9 @@ app = create_app(
 `AutobiographyService` 把滚动历史压缩成带日期的自传章节：每章覆盖最近 8 条 episode（不足 3 条不动笔）、重要 fact、14 天情绪统计与人格 revision。生成走后台路径（`automatic_memory` 循环内 `asyncio.to_thread`），单次模型调用（purpose=`autobiography`，先 reserve 后按实际 usage 结算）；未配置模型时退化为确定性模板。对话提示只注入当前章节摘要（`自我叙事` 前缀，字符有上限），生成绝不发生在对话事务内——读事务选素材，无事务调模型，短写事务落盘。
 
 章节带 provenance 与 fingerprint：任一来源 memory 被更正（revision 变化）或停用，fingerprint 不再匹配，章节标记 `dirty` 并在下一次后台处理时重建为新章（旧 dirty 保留）；note() 对 dirty 章节返回 None，避免提示引用过期叙事。`chapter_gap_days`（默认 7 天）内且素材未变化时不重复生成。自传随 `[model]` 启用，无独立开关；关闭模型时服务自动禁用。
+
+## 情绪调制记忆编码
+
+自动记忆写入时按对话当时的情绪强度微调 importance（mood-congruent encoding）：对每个来源对话完成事件读取 `emotion_experiences` 中未失效的 appraisal delta，`intensity = min(1, |valence| + 0.5 * |arousal - 0.5|)`，`shift = EMOTION_IMPORTANCE_CAP(0.15) * intensity * sign(valence)`。正向情绪强化、负向情绪弱化（下限 0.05、上限 1.0），中性事件不动。
+
+只调制自动新插记忆的 importance；命中的 duplicate、冲突合并与用户手工写入不受影响。被调制的记录 tags 记入 `encoded_under_emotion` 与 `emotion:valence=…,arousal=…,shift=…` 供审计与后续修正。`emotion_experiences` 表缺失（纯 MemoryService 环境）时安全返回空映射，不报错。调节发生在 `_commit_output` 写事务内、插入之前，不额外调用模型。

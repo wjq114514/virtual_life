@@ -3,6 +3,7 @@
 import hashlib
 import json
 import re
+import sqlite3
 import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -20,6 +21,13 @@ from .proactivity import MAX_TASK_DELAY_SECONDS, MIN_TASK_DELAY_SECONDS
 Text = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=2048)]
 ShortText = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=128)]
 PROMPT_VERSION = "auto-memory-v2"
+
+# Emotion-modulated encoding: when a memory is written from a dialogue, the
+# affect experienced during that exchange shifts the encoded importance
+# (mood-congruent memory strength). The shift is capped and only applies to
+# memories freshly inserted by automatic extraction, never to duplicates or
+# user-authored records.
+EMOTION_IMPORTANCE_CAP = 0.15
 
 
 class ExtractedMemory(BaseModel):
@@ -368,6 +376,7 @@ class AutoMemoryService:
         supersedes=None,
         occurred_at=None,
         retention_policy="auto",
+        tags=None,
     ):
         now = self.memory._timestamp(self.memory._now())
         memory_id = "mem_" + uuid.uuid4().hex
@@ -376,7 +385,7 @@ class AutoMemoryService:
             normalized_content,semantic_key,tags_json,importance,confidence,confirmed,pinned,
             active,created_at,updated_at,revision,occurred_at,episode_identity,supersedes_id,
             retention_policy)
-            VALUES(?,?,?,?,?,?,'[]',?,?,0,0,1,?,?,1,?,?,?,?)""",
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 memory_id,
                 companion_id,
@@ -384,10 +393,15 @@ class AutoMemoryService:
                 content,
                 _normalize(content),
                 semantic_key,
+                _json(tags or []),
                 importance,
                 confidence,
+                0,
+                0,
+                1,
                 now,
                 now,
+                1,
                 occurred_at if kind == "episode" else None,
                 "event:" + event_id if kind == "episode" else None,
                 supersedes,
@@ -1028,6 +1042,52 @@ class AutoMemoryService:
                 ).fetchall()
         return [self._external_receipt(connection, row) for row in rows]
 
+    def _emotion_encoding(self, connection, companion_id, sources):
+        """Affect felt during each source dialogue, keyed by completed event id.
+
+        Reads emotion_experiences (invalidated=0) linked to the dialogue via
+        completed_event_id. The importance shift is mood-congruent and capped:
+        intensity scales with |valence| and |arousal-0.5|, the sign follows the
+        valence, and the recorded tag keeps the original numbers for audit.
+        """
+        encoding: dict[str, dict] = {}
+        try:
+            rows = connection.execute(
+                """SELECT completed_event_id, appraisal_json FROM emotion_experiences
+                    WHERE companion_id=? AND invalidated=0""",
+                (companion_id,),
+            ).fetchall()
+        except sqlite3.OperationalError:
+            # emotion_experiences lives in the emotion subsystem's schema; when
+            # that subsystem has never run (unit tests, fresh deployments) there
+            # is nothing to modulate with.
+            return encoding
+        appraisals = {}
+        for experience in rows:
+            try:
+                appraisal = json.loads(experience["appraisal_json"])
+                delta = appraisal.get("delta") or {}
+            except (TypeError, ValueError):
+                continue
+            appraisals[experience["completed_event_id"]] = delta
+        for row in sources:
+            delta = appraisals.get(row["event_id"])
+            if delta is None:
+                continue
+            valence = float(delta.get("valence") or 0.0)
+            arousal = float(delta.get("arousal") or 0.5)
+            intensity = min(1.0, abs(valence) + 0.5 * abs(arousal - 0.5))
+            sign = 1 if valence > 0 else (-1 if valence < 0 else 0)
+            shift = round(EMOTION_IMPORTANCE_CAP * intensity * sign, 4)
+            if shift == 0:
+                continue
+            encoding[row["event_id"]] = {
+                "valence": round(valence, 4),
+                "arousal": round(arousal, 4),
+                "importance_shift": shift,
+            }
+        return encoding
+
     def _commit(self, job_id, companion_id, sources, output, usage):
         with self.memory.logs.correlate(job_id=job_id):
             return self._commit_output(job_id, companion_id, sources, output, usage)
@@ -1039,6 +1099,7 @@ class AutoMemoryService:
             else:
                 valid = True
                 source_map = {row["event_id"]: row for row in sources}
+                encoding = self._emotion_encoding(connection, companion_id, sources)
                 versions = [
                     {"memory_id": row["source_memory_id"], "revision": row["source_revision"]}
                     for row in sources
@@ -1110,6 +1171,22 @@ class AutoMemoryService:
                         connection.execute(
                             "DELETE FROM memory_terms WHERE memory_id=?", (supersedes,)
                         )
+                    encoded = encoding.get(item.source_event_id)
+                    modulated_importance = item.importance
+                    encoded_tags = None
+                    if duplicate is None and encoded is not None:
+                        modulated_importance = min(
+                            1.0,
+                            max(0.05, round(item.importance + encoded["importance_shift"], 4)),
+                        )
+                        encoded_tags = [
+                            "encoded_under_emotion",
+                            (
+                                f"emotion:valence={encoded['valence']},"
+                                f"arousal={encoded['arousal']},"
+                                f"shift={encoded['importance_shift']}"
+                            ),
+                        ]
                     record = duplicate or self._insert_memory(
                         connection,
                         companion_id,
@@ -1117,10 +1194,11 @@ class AutoMemoryService:
                         item.content,
                         item.source_event_id,
                         semantic_key=key,
-                        importance=item.importance,
+                        importance=modulated_importance,
                         confidence=item.confidence,
                         supersedes=supersedes,
                         retention_policy=retention_policy,
+                        tags=encoded_tags,
                     )
                     if duplicate is None:
                         connection.execute(

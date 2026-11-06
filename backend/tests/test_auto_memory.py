@@ -668,3 +668,64 @@ def test_extraction_without_notes_keeps_transcript(tmp_path):
     rows = episodes(memory)
     assert rows[0]["content"].startswith("User: ")
     assert rows[0]["revision"] == 1
+
+
+def _emotion_experience(memory, event_id, valence, arousal, clock):
+    from virtual_life.emotion import _SCHEMA as EMOTION_SCHEMA
+
+    appraisal = {"delta": {"valence": valence, "arousal": arousal}}
+    now = memory._timestamp(clock.value)
+    with memory._connection(write=True) as connection:
+        for statement in EMOTION_SCHEMA:
+            connection.execute(statement)
+        connection.execute(
+            """INSERT OR IGNORE INTO companions(companion_id,name,revision,epoch,
+            activity_json,interaction_mode,context_json,memory_refs_json,
+            created_at,updated_at) VALUES('sui','Sui',0,0,'{}','chat','{}','[]',?,?)""",
+            (now, now),
+        )
+        connection.execute(
+            """INSERT INTO emotion_experiences(event_id,companion_id,completed_event_id,
+            appraisal_json,invalidated,created_at) VALUES(?,?,?,?,0,?)""",
+            (
+                event_id,
+                "sui",
+                event_id,
+                json.dumps(appraisal, ensure_ascii=False),
+                memory._timestamp(clock.value),
+            ),
+        )
+
+
+def test_positive_emotion_raises_importance_with_audit_tag(tmp_path):
+    memory, auto, provider, clock = environment(tmp_path)
+    enqueue(memory, auto, clock, "e1", "我喜欢乌龙茶")
+    _emotion_experience(memory, "e1", 0.4, 0.7, clock)
+    extract(provider, fact("e1", "我喜欢乌龙茶", importance=0.5))
+    result = auto.process_next("sui", force=True)
+    assert result["status"] == "completed"
+    with memory._connection() as connection:
+        row = connection.execute(
+            "SELECT importance,tags_json FROM memory_records"
+            " WHERE companion_id='sui' AND active=1 AND kind='fact'"
+        ).fetchone()
+    # intensity = 0.4 + 0.5*|0.7-0.5| = 0.5, shift = 0.15*0.5 = 0.075
+    assert row["importance"] == 0.575
+    tags = json.loads(row["tags_json"])
+    assert "encoded_under_emotion" in tags
+    assert any("valence=0.4" in tag for tag in tags)
+
+
+def test_no_emotion_experience_leaves_importance_untouched(tmp_path):
+    memory, auto, provider, clock = environment(tmp_path)
+    enqueue(memory, auto, clock, "e1", "我喜欢乌龙茶")
+    extract(provider, fact("e1", "我喜欢乌龙茶", importance=0.5))
+    result = auto.process_next("sui", force=True)
+    assert result["status"] == "completed"
+    with memory._connection() as connection:
+        row = connection.execute(
+            "SELECT importance,tags_json FROM memory_records"
+            " WHERE companion_id='sui' AND active=1 AND kind='fact'"
+        ).fetchone()
+    assert row["importance"] == 0.5
+    assert json.loads(row["tags_json"]) == []
