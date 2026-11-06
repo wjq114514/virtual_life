@@ -27,7 +27,7 @@ from .models import Identifier, JsonObject
 from .personality import PersonalityError
 from .personality_prompt import PersonalityPreview, PersonalityPreviewResult
 from .ports import ModelRequest, ModelUsage, ToolResult
-from .reply_split import llm_split_reply, split_reply
+from .reply_split import llm_split_reply, split_reply, typing_delays
 from .scene_classifier.runtime import SceneObservation
 from .typo import apply_typo
 
@@ -229,6 +229,14 @@ class DialogueResult(BaseModel):
     # sentence/clause splitter (including the LLM fallback path); "none" =
     # splitting disabled or the turn never produced a completed reply.
     reply_split_engine: Literal["none", "rules", "llm"] = "none"
+    # Per-bubble suggested typing delay in milliseconds (same length as
+    # reply_messages when present): wait this long after the previous bubble
+    # before sending the next one. Clients that deliver bubbles as separate
+    # messages use it to reproduce a natural typing rhythm; clients that send
+    # assistant_message as one message ignore it. Deterministic on
+    # (companion_id, index, bubble text), so a replayed receipt yields the
+    # same rhythm.
+    reply_delays: list[int] | None = None
     source_event_id: Identifier | None = None
     accepted_event_id: Identifier | None = None
     emotion: EmotionSnapshot | None = None
@@ -1788,6 +1796,7 @@ class DialogueService:
                     )
                     result.reply_split_engine = "rules"
                 result.reply_messages = bubbles
+                result.reply_delays = typing_delays(bubbles, companion_id=companion_id)
             receipt = result.model_dump(mode="json")
             connection.execute(
                 "UPDATE dialogue_commands SET status = ?, result_json = ? WHERE command_id = ?",

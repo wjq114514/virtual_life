@@ -8342,6 +8342,20 @@
             "title": "Reply Split Engine",
             "default": "none"
           },
+          "reply_delays": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "integer"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reply Delays"
+          },
           "source_event_id": {
             "anyOf": [
               {
@@ -8733,7 +8747,8 @@
               "proactive_replied",
               "proactive_unanswered",
               "loneliness_idle",
-              "loneliness_neglect"
+              "loneliness_neglect",
+              "absence_reunion"
             ],
             "title": "Reason"
           },

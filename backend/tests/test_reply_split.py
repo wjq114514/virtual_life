@@ -6,7 +6,7 @@ from fastapi.testclient import TestClient
 from test_api import attach_desktop
 from virtual_life.api import create_app
 from virtual_life.ports import ModelResult, ModelUsage
-from virtual_life.reply_split import split_reply
+from virtual_life.reply_split import split_reply, typing_delays
 from virtual_life.settings import Settings
 
 
@@ -184,3 +184,81 @@ class TestReplySplitEngineField:
             assert result["status"] == "completed"
             assert result["reply_split_engine"] == "none"
             assert result["reply_messages"] is None
+
+
+class TestTypingDelays:
+    def test_empty_bubbles_return_empty(self):
+        assert typing_delays([]) == []
+
+    def test_deterministic_for_same_inputs(self):
+        bubbles = ["嗯，看到了。", "这个方案其实挺清楚的。", "先把基础做完吧。"]
+        first = typing_delays(bubbles, companion_id="sui")
+        second = typing_delays(bubbles, companion_id="sui")
+        assert first == second
+        other = typing_delays(bubbles, companion_id="other")
+        assert other != first  # companion seed changes the rhythm
+
+    def test_delays_are_bounded_and_positive(self):
+        bubbles = ["嗯。", "挺长的泡泡" * 30]
+        delays = typing_delays(bubbles, companion_id="sui")
+        assert len(delays) == len(bubbles)
+        for delay in delays:
+            assert 60 <= delay <= 4200
+
+    def test_reply_delays_match_reply_messages(self, tmp_path):
+        provider = LongProvider()
+        settings = Settings(
+            database_path=str(tmp_path / "delays.sqlite"),
+            api_token="test-token",
+            dialogue_reply_split_enabled=True,
+            model_base_url="http://model.invalid",
+            model_name="fake",
+        )
+        app = create_app(settings, model_provider=provider)
+        with TestClient(app, headers={"Authorization": "Bearer test-token"}) as client:
+            state = attach_desktop(client)
+            response = client.post(
+                "/v1/companions/sui/dialogue",
+                json={
+                    "command_id": "delays-1",
+                    "node_id": "desk",
+                    "epoch": state["epoch"],
+                    "expected_revision": state["revision"],
+                    "user_message": "这个方案你觉得怎么样",
+                },
+            )
+            assert response.status_code == 200, response.text
+            result = response.json()
+            assert result["status"] == "completed"
+            assert result["reply_messages"], result
+            assert len(result["reply_delays"]) == len(result["reply_messages"])
+            for delay in result["reply_delays"]:
+                assert 60 <= delay <= 4200
+
+    def test_reply_delays_none_when_disabled(self, tmp_path):
+        provider = LongProvider()
+        settings = Settings(
+            database_path=str(tmp_path / "delays-off.sqlite"),
+            api_token="test-token",
+            model_base_url="http://model.invalid",
+            model_name="fake",
+            dialogue_reply_split_enabled=False,
+        )
+        app = create_app(settings, model_provider=provider)
+        with TestClient(app, headers={"Authorization": "Bearer test-token"}) as client:
+            state = attach_desktop(client)
+            response = client.post(
+                "/v1/companions/sui/dialogue",
+                json={
+                    "command_id": "delays-2",
+                    "node_id": "desk",
+                    "epoch": state["epoch"],
+                    "expected_revision": state["revision"],
+                    "user_message": "这个方案你觉得怎么样",
+                },
+            )
+            assert response.status_code == 200, response.text
+            result = response.json()
+            assert result["status"] == "completed"
+            assert result["reply_messages"] is None
+            assert result["reply_delays"] is None

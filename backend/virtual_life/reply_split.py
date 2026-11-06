@@ -15,6 +15,7 @@ bubble so no content is dropped.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 
@@ -114,6 +115,38 @@ def _hard_chunk(text: str, max_chars: int, max_messages: int) -> list[str]:
 def _squash(text: str) -> str:
     """Remove all whitespace so a split can be compared to its source verbatim."""
     return "".join(text.split())
+
+
+def typing_delays(
+    bubbles: list[str],
+    *,
+    companion_id: str = "",
+) -> list[int]:
+    """Per-bubble typing delays in milliseconds, matching ``bubbles`` 1:1.
+
+    Models the pause a person takes between sending several short messages:
+    the first bubble answers what was just read (short pause), later bubbles
+    feel "typed" at a steady per-character rate. The value is the delay to
+    wait *after the previous bubble* before sending this one.
+
+    Deterministic on (companion_id, index, bubble text) so the same reply
+    always gets the same rhythm — IM clients may replay the receipt — and no
+    wall clock or RNG state is involved. Single-bubble replies return a small
+    value so clients that honor it do not stall a normal one-message reply.
+    """
+    if not bubbles:
+        return []
+    delays: list[int] = []
+    for index, bubble in enumerate(bubbles):
+        chars = len(bubble.strip()) if bubble else 0
+        base = 260 + 55 * chars
+        if index > 0:
+            base += 180  # picking the phone back up between bubbles
+        base = min(base, 4200)
+        seed = hashlib.sha256(f"{companion_id}|{index}|{bubble}".encode("utf-8")).digest()
+        jitter = 0.85 + (int.from_bytes(seed[:2], "big") / 65535.0) * 0.3  # 0.85..1.15
+        delays.append(max(60, min(int(base * jitter), 4200)))
+    return delays
 
 
 def _llm_split_prompt(text: str, max_messages: int, max_chars: int) -> str:
