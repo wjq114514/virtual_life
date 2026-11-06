@@ -101,6 +101,12 @@ availability 为 available/busy/unknown。activity 支持 code/docs/chat/meeting
 
 curious 活动是一个特例：候选冲动本身说明"想看看周围"，派发前服务端会先调一次 `inner_life.peek()`（复用动作系统的 adb 感知，读当前前台应用名），成功时把"你刚才好奇地看了一眼手机屏幕，现在打开的是某应用"作为亲见事实注入提示；peek 失败或不满足门槛则保持原提示，不虚构任何屏幕内容。
 
+## 时间仪式感
+
+日常问候不再单独入队。伙伴每天派发的第一条 `origin=inner` 或 `origin=attention`（boundary）主动消息会在派发时追加一段附注：本地时区为上午时提示"可以顺便道一声早"，傍晚或晚上时提示"可以道一声晚安"，自然带过、不刻意单独问候。附注生成即写入一条 `companion.ritual` 事件（kind=morning/evening，按本地日去重），同一本地日不会再发第二条。
+
+纪念日单独入队为 `origin=ritual` 候选：`POST /v1/companions/{id}/calendar-marks` 登记 month_day（MM-DD）与 label，命中当天且当年未发过时生成 anniversary 候选，仍须通过全部主动 gate；派发上下文携带纪念日名称，提示要求简短温和、不编造共同经历细节。`GET /v1/companions/{id}/calendar-marks` 与 `DELETE /v1/companions/{id}/calendar-marks/{mark_id}` 管理登记项。
+
 策略默认值：
 
 ```json

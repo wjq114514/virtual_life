@@ -3001,6 +3001,160 @@
         }
       }
     },
+    "/v1/companions/{companion_id}/calendar-marks": {
+      "get": {
+        "tags": [
+          "proactivity"
+        ],
+        "summary": "List Calendar Marks",
+        "description": "List calendar marks (annual dates the companion should remember).",
+        "operationId": "list_calendar_marks_v1_companions__companion_id__calendar_marks_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "companion_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Companion Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "proactivity"
+        ],
+        "summary": "Create Calendar Mark",
+        "description": "Add a calendar mark like \"05-20\" with a short label.",
+        "operationId": "create_calendar_mark_v1_companions__companion_id__calendar_marks_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "companion_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Companion Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CalendarMarkRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/companions/{companion_id}/calendar-marks/{mark_id}": {
+      "delete": {
+        "tags": [
+          "proactivity"
+        ],
+        "summary": "Delete Calendar Mark",
+        "operationId": "delete_calendar_mark_v1_companions__companion_id__calendar_marks__mark_id__delete",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "companion_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Companion Id"
+            }
+          },
+          {
+            "name": "mark_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Mark Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/companions/{companion_id}/tools": {
       "get": {
         "tags": [
@@ -7323,6 +7477,36 @@
           "file"
         ],
         "title": "Body_upload_v1_dist_packages_post"
+      },
+      "CalendarMarkRequest": {
+        "properties": {
+          "command_id": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Command Id"
+          },
+          "month_day": {
+            "type": "string",
+            "maxLength": 5,
+            "minLength": 5,
+            "title": "Month Day"
+          },
+          "label": {
+            "type": "string",
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Label"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "command_id",
+          "month_day",
+          "label"
+        ],
+        "title": "CalendarMarkRequest"
       },
       "ClientFeatures": {
         "properties": {
@@ -13627,7 +13811,8 @@
               "attention",
               "inner",
               "schedule",
-              "task"
+              "task",
+              "ritual"
             ],
             "title": "Origin",
             "default": "attention"

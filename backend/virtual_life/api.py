@@ -307,6 +307,13 @@ class ScheduledTaskRequest(BaseModel):
     delay_seconds: int = Field(ge=60, le=2_592_000)
 
 
+class CalendarMarkRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    command_id: Identifier
+    month_day: str = Field(min_length=5, max_length=5)
+    label: str = Field(min_length=1, max_length=200)
+
+
 class DelegationRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     command_id: Identifier
@@ -1468,6 +1475,29 @@ def create_app(
     )
     def cancel_scheduled_task(companion_id: str, task_id: str):
         return proactivity.cancel_task(companion_id, task_id)
+
+    @router.get("/companions/{companion_id}/calendar-marks", tags=["proactivity"])
+    def list_calendar_marks(companion_id: str):
+        """List calendar marks (annual dates the companion should remember)."""
+        return proactivity.list_marks(companion_id)
+
+    @router.post(
+        "/companions/{companion_id}/calendar-marks",
+        status_code=201,
+        tags=["proactivity"],
+    )
+    def create_calendar_mark(companion_id: str, body: CalendarMarkRequest):
+        """Add a calendar mark like "05-20" with a short label."""
+        return proactivity.add_mark(
+            companion_id, body.command_id, body.month_day, body.label
+        )
+
+    @router.delete(
+        "/companions/{companion_id}/calendar-marks/{mark_id}",
+        tags=["proactivity"],
+    )
+    def delete_calendar_mark(companion_id: str, mark_id: str):
+        return proactivity.delete_mark(companion_id, mark_id)
 
     @router.get("/companions/{companion_id}/tools", tags=["tools"])
     def get_tools(

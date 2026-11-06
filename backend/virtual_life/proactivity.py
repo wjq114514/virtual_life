@@ -198,7 +198,7 @@ class ProactivityDecision(BaseModel):
     command_id: Identifier
     created_at: str
     expires_at: str
-    origin: Literal["attention", "inner", "schedule", "task"] = "attention"
+    origin: Literal["attention", "inner", "schedule", "task", "ritual"] = "attention"
     source_activity_id: Identifier | None = None
     scheduled_task_id: Identifier | None = None
     started_at: str | None = None
@@ -275,6 +275,17 @@ class ProactivityService:
                     ON scheduled_tasks(status, due_at)""",
                 """CREATE INDEX IF NOT EXISTS scheduled_task_companion
                     ON scheduled_tasks(companion_id, created_at)""",
+                """CREATE TABLE IF NOT EXISTS calendar_marks (
+                    mark_id TEXT PRIMARY KEY,
+                    companion_id TEXT NOT NULL REFERENCES companions(companion_id),
+                    command_id TEXT NOT NULL,
+                    month_day TEXT NOT NULL,
+                    label TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE(companion_id, month_day, label))""",
+                """CREATE INDEX IF NOT EXISTS calendar_mark_companion
+                    ON calendar_marks(companion_id, month_day)""",
             ):
                 connection.execute(statement)
             columns = {
@@ -897,6 +908,117 @@ class ProactivityService:
         with self.store.transaction() as connection:
             return self._companion_attention(connection, companion, self.coordinator._now())
 
+    def add_mark(self, companion_id, command_id, month_day, label):
+        if not isinstance(month_day, str):
+            raise ValueError("month_day must be text")
+        month_day = month_day.strip()
+        parts = month_day.split("-")
+        valid = len(parts) == 2
+        if valid:
+            try:
+                month, day = int(parts[0]), int(parts[1])
+                valid = 1 <= month <= 12 and 1 <= day <= 31
+            except ValueError:
+                valid = False
+        if not valid:
+            raise DomainError(
+                422, "invalid_month_day", "month_day must look like MM-DD (01-01 .. 12-31)"
+            )
+        if not isinstance(label, str):
+            raise DomainError(422, "invalid_label", "label must be text")
+        label = label.strip()
+        if not 1 <= len(label) <= 200:
+            raise DomainError(422, "invalid_label", "label must contain 1 to 200 characters")
+        with self.store.transaction(write=True) as connection:
+            self.coordinator._row(connection, "companions", "companion_id", companion_id)
+            existing = connection.execute(
+                "SELECT * FROM calendar_marks WHERE command_id=?",
+                (command_id,),
+            ).fetchone()
+            if existing is not None:
+                if existing["companion_id"] != companion_id:
+                    raise DomainError(
+                        422,
+                        "command_conflict",
+                        "Calendar mark command belongs to another companion",
+                    )
+                return {"mark": self._mark_snapshot(existing), "event": None}
+            now = self.coordinator._now()
+            identity = _json(["calendar_mark", companion_id, command_id])
+            mark_id = hashlib.sha256(identity.encode()).hexdigest()
+            event = self.coordinator._emit(
+                connection,
+                now,
+                "companion.calendar_mark_created",
+                {"mark_id": mark_id, "month_day": month_day, "label": label},
+                companion_id=companion_id,
+            )
+            connection.execute(
+                """INSERT OR IGNORE INTO calendar_marks
+                    (mark_id, companion_id, command_id, month_day, label,
+                     created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    mark_id,
+                    companion_id,
+                    command_id,
+                    month_day,
+                    label,
+                    _timestamp(now),
+                    _timestamp(now),
+                ),
+            )
+            row = connection.execute(
+                "SELECT * FROM calendar_marks WHERE mark_id=? OR command_id=?",
+                (mark_id, command_id),
+            ).fetchone()
+            return {"mark": self._mark_snapshot(row), "event": event}
+
+    def list_marks(self, companion_id):
+        with self.store.transaction() as connection:
+            self.coordinator._row(connection, "companions", "companion_id", companion_id)
+            rows = connection.execute(
+                """SELECT * FROM calendar_marks WHERE companion_id=?
+                    ORDER BY month_day, label""",
+                (companion_id,),
+            ).fetchall()
+            return {
+                "companion_id": companion_id,
+                "marks": [self._mark_snapshot(row) for row in rows],
+            }
+
+    def delete_mark(self, companion_id, mark_id, command_id=None):
+        with self.store.transaction(write=True) as connection:
+            self.coordinator._row(connection, "companions", "companion_id", companion_id)
+            row = connection.execute(
+                "SELECT * FROM calendar_marks WHERE mark_id=? AND companion_id=?",
+                (mark_id, companion_id),
+            ).fetchone()
+            if row is None:
+                raise DomainError(404, "not_found", "Calendar mark not found")
+            now = self.coordinator._now()
+            self.coordinator._emit(
+                connection,
+                now,
+                "companion.calendar_mark_deleted",
+                {"mark_id": mark_id, "label": row["label"]},
+                companion_id=companion_id,
+            )
+            connection.execute(
+                "DELETE FROM calendar_marks WHERE mark_id=?",
+                (mark_id,),
+            )
+            return {"deleted": True, "mark_id": mark_id}
+
+    def _mark_snapshot(self, row):
+        return {
+            "mark_id": row["mark_id"],
+            "companion_id": row["companion_id"],
+            "month_day": row["month_day"],
+            "label": row["label"],
+            "created_at": row["created_at"],
+        }
+
     def observe(self, node_id, payload):
         data = AttentionObservation.model_validate(payload).model_dump(mode="json")
         sample = data["sample"]
@@ -1107,6 +1229,13 @@ class ProactivityService:
             idle = self._idle_reason(connection, companion["companion_id"], now)
             if idle is not None:
                 return idle
+        elif origin == "ritual":
+            ritual = connection.execute(
+                "SELECT 1 FROM events WHERE event_id=? AND type='companion.ritual'",
+                (candidate["source_event_id"],),
+            ).fetchone()
+            if ritual is None:
+                return "ritual_missing"
         else:
             source = connection.execute(
                 "SELECT sequence, payload_json FROM events WHERE event_id=?",
@@ -1161,7 +1290,7 @@ class ProactivityService:
                 (companion["companion_id"],),
             ).fetchone():
                 return "no_dialogue_history"
-        elif origin in ("schedule", "task"):
+        elif origin in ("schedule", "task", "ritual"):
             pass
         else:
             recent_user = connection.execute(
@@ -1554,12 +1683,156 @@ class ProactivityService:
                     level=level,
                 )
 
+    _RITUAL_EVENING_PARTS = ("傍晚", "晚上")
+    _RITUAL_CANDIDATE_TTL_SECONDS = 6 * 3600
+
+    def _ritual_seen(self, connection, companion_id, kind, mark_id, local_day, year):
+        for event in connection.execute(
+            """SELECT payload_json, occurred_at FROM events
+                WHERE type='companion.ritual' AND companion_id=?
+                ORDER BY sequence DESC LIMIT 60""",
+            (companion_id,),
+        ).fetchall():
+            try:
+                payload = json.loads(event["payload_json"])
+                if not isinstance(payload, dict):
+                    continue
+            except ValueError:
+                continue
+            if payload.get("kind") != kind:
+                continue
+            when = _instant(event["occurred_at"]).astimezone()
+            if kind == "anniversary":
+                if payload.get("mark_id") == mark_id and when.year == year:
+                    return True
+            elif when.strftime("%Y-%m-%d") == local_day:
+                return True
+        return False
+
+    def _daily_ritual_note(self, companion_id, now):
+        """One soft morning/evening greeting per local day, attached to the
+        first boundary/inner dispatch instead of a standalone candidate.
+
+        Emits a ``companion.ritual`` event on first use of the day and returns
+        an aside for the assembled user_message; returns "" once seen.
+        """
+        local = now.astimezone()
+        part = day_part(local.hour)
+        if part == "上午":
+            kind = "morning"
+        elif part in self._RITUAL_EVENING_PARTS:
+            kind = "evening"
+        else:
+            return ""
+        local_day = local.strftime("%Y-%m-%d")
+        year = local.year
+        with self.store.transaction(write=True) as connection:
+            if self._ritual_seen(connection, companion_id, kind, None, local_day, year):
+                return ""
+            self.coordinator._emit(
+                connection,
+                now,
+                "companion.ritual",
+                {"kind": kind, "mark_id": None, "label": None},
+                companion_id=companion_id,
+            )
+        if kind == "morning":
+            return (
+                " 另外这是今天第一条主动消息，又是一个平常的上午——"
+                "可以顺便道一声早，自然带过，不刻意单独问候。"
+            )
+        return (
+            " 另外这是今天第一条主动消息，这一天快结束了——"
+            "可以顺便说一句晚安式的话，自然带过，不刻意单独问候。"
+        )
+
+    def _ritual_check(self, connection, now) -> None:
+        """Calendar marks (anniversaries) keyed to their marked date.
+
+        Daily greetings no longer enqueue standalone candidates; they ride
+        along the first boundary/inner dispatch of the day via
+        ``_daily_ritual_note``.
+        """
+        local = now.astimezone()
+        local_day = local.strftime("%Y-%m-%d")
+        month_day = local.strftime("%m-%d")
+        year = local.year
+        for companion_row in connection.execute("SELECT companion_id FROM companions").fetchall():
+            companion_id = companion_row["companion_id"]
+            companion = self.coordinator._companion(
+                self.coordinator._row(connection, "companions", "companion_id", companion_id)
+            )
+            if not companion["active_node_id"]:
+                continue
+            if not self._policy(connection, companion_id)["policy"]["enabled"]:
+                continue
+            pending = []
+            for mark in connection.execute(
+                "SELECT * FROM calendar_marks WHERE companion_id=? AND month_day=?",
+                (companion_id, month_day),
+            ).fetchall():
+                pending.append(("anniversary", "ritual_anniversary", mark, local_day))
+            for kind, boundary, mark, day_key in pending:
+                mark_id = mark["mark_id"] if mark is not None else None
+                if self._ritual_seen(connection, companion_id, kind, mark_id, day_key, year):
+                    continue
+                event = self.coordinator._emit(
+                    connection,
+                    now,
+                    "companion.ritual",
+                    {
+                        "kind": kind,
+                        "mark_id": mark_id,
+                        "label": mark["label"] if mark is not None else None,
+                    },
+                    companion_id=companion_id,
+                )
+                identity = _json(["ritual", companion_id, kind, mark_id or day_key, year])
+                candidate_id = hashlib.sha256(identity.encode()).hexdigest()
+                policy = self._policy(connection, companion_id)
+                expires = now + timedelta(seconds=self._RITUAL_CANDIDATE_TTL_SECONDS)
+                cursor = connection.execute(
+                    """INSERT OR IGNORE INTO proactivity_candidates
+                        (candidate_id, companion_id, node_id, epoch, source_event_id,
+                         boundary, policy_revision, status, reason, command_id,
+                         created_at, expires_at, origin)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', 'eligible', ?, ?, ?,
+                                'ritual')""",
+                    (
+                        candidate_id,
+                        companion_id,
+                        companion["active_node_id"],
+                        companion["epoch"],
+                        event["event_id"],
+                        boundary,
+                        policy["revision"],
+                        "proactive-" + candidate_id,
+                        _timestamp(now),
+                        _timestamp(expires),
+                    ),
+                )
+                if not cursor.rowcount:
+                    continue
+                row = connection.execute(
+                    "SELECT * FROM proactivity_candidates WHERE candidate_id=?",
+                    (candidate_id,),
+                ).fetchone()
+                reason = self._reason(connection, row, companion, now)
+                self._decision(
+                    connection,
+                    row,
+                    "queued" if reason == "eligible" else "suppressed",
+                    reason,
+                    now,
+                )
+
     def process_next(self, companion_id=None):
         with self.store.transaction(write=True) as connection:
             now = self.coordinator._now()
             self._recover(connection, now)
             self._feedback_timeouts(connection, now)
             self._loneliness_check(connection, now)
+            self._ritual_check(connection, now)
             self._enqueue_tasks(connection, now)
             self._enqueue_scheduled(connection, now)
             self._enqueue_inner(connection, now)
@@ -1627,6 +1900,7 @@ class ProactivityService:
                 + content
                 + " 只有在自然合适时才简短开口，不要复述这段内部说明，也不要声称知道用户未提供的事情。"
                 + peek_note
+                + self._daily_ritual_note(row["companion_id"], now)
             )
         elif row["origin"] == "task":
             task = None
@@ -1653,8 +1927,33 @@ class ProactivityService:
                 "你已经很久没有和用户交谈了。现在可以简短主动说一句；"
                 "如果没有自然合适的话题就保持沉默，不要声称知道用户未提供的事情。" + note
             )
+        elif row["origin"] == "ritual":
+            ritual = None
+            with self.store.transaction() as connection:
+                ritual = connection.execute(
+                    "SELECT payload_json FROM events WHERE event_id=?",
+                    (row["source_event_id"],),
+                ).fetchone()
+            label = None
+            if ritual is not None:
+                try:
+                    data = json.loads(ritual["payload_json"])
+                    label = data.get("label") if isinstance(data, dict) else None
+                except ValueError:
+                    label = None
+            label_note = (
+                f"今天是用户标记的纪念日“{label}”。" if label else "今天是用户标记的纪念日。"
+            )
+            user_message = (
+                label_note + "可以自然地提一句，简短温和，不要编造你们共同经历的细节。"
+                "不要把这段内部说明复述给用户。" + note
+            )
         else:
-            user_message = descriptions[row["boundary"]] + note
+            user_message = (
+                descriptions[row["boundary"]]
+                + note
+                + self._daily_ritual_note(row["companion_id"], now)
+            )
         try:
             result = self.dialogue.send_proactive(
                 row["companion_id"],

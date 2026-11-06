@@ -60,9 +60,10 @@ class ProactivityOutputService:
 
     @staticmethod
     def _interrupted(connection, candidate, event_sequence):
-        if candidate["origin"] in ("schedule", "task"):
-            # Scheduled origins have no attention sample to compare against.
-            # Eligibility is rechecked by _current before this method is called.
+        if candidate["origin"] in ("schedule", "task", "ritual"):
+            # Scheduled and ritual origins have no attention sample to compare
+            # against. Eligibility is rechecked by _current before this method
+            # is called.
             return False
         if candidate["origin"] == "inner":
             activity = connection.execute(
@@ -80,7 +81,10 @@ class ProactivityOutputService:
             ).fetchone()
             if original is None:
                 return True
-            sample = json.loads(original["payload_json"])["data"]["attention"]
+            payload = json.loads(original["payload_json"])
+            sample = payload.get("data", payload).get("attention")
+            if sample is None:
+                return True
             session_id = sample["session_id"]
             boundary_id = sample["boundary_id"]
         # A remark that became inappropriate must not reappear after attention

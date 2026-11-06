@@ -954,3 +954,154 @@ def test_curious_inner_message_without_peek_keeps_prompt_plain(runtime):
     assert result["status"] == "awaiting_generation", result
     assert len(captured) == 1
     assert "看了一眼手机屏幕" not in captured[0]
+
+
+def _ritual_events(client, kind=None):
+    page = client.get("/v1/events?limit=500").json()["events"]
+    return [
+        event
+        for event in page
+        if event["type"] == "companion.ritual"
+        and (kind is None or event["payload"].get("kind") == kind)
+    ]
+
+
+def test_calendar_mark_api_lifecycle(runtime):
+    client, _, _, _, _ = runtime
+    created = client.post(
+        "/v1/companions/sui/calendar-marks",
+        json={"command_id": "mark-1", "month_day": "05-20", "label": "我们的纪念日"},
+    )
+    assert created.status_code == 201, created.text
+    mark = created.json()["mark"]
+    assert mark["month_day"] == "05-20"
+    assert mark["label"] == "我们的纪念日"
+    repeated = client.post(
+        "/v1/companions/sui/calendar-marks",
+        json={"command_id": "mark-1", "month_day": "05-20", "label": "我们的纪念日"},
+    )
+    assert repeated.status_code == 201
+    assert repeated.json()["mark"]["mark_id"] == mark["mark_id"]
+    invalid = client.post(
+        "/v1/companions/sui/calendar-marks",
+        json={"command_id": "mark-2", "month_day": "13-01", "label": "x"},
+    )
+    assert invalid.status_code == 422
+    listing = client.get("/v1/companions/sui/calendar-marks").json()
+    assert [m["mark_id"] for m in listing["marks"]] == [mark["mark_id"]]
+    deleted = client.delete(f"/v1/companions/sui/calendar-marks/{mark['mark_id']}")
+    assert deleted.status_code == 200
+    assert client.get("/v1/companions/sui/calendar-marks").json()["marks"] == []
+    assert client.delete(f"/v1/companions/sui/calendar-marks/{mark['mark_id']}").status_code == 404
+
+
+def test_morning_ritual_fires_once_per_local_day(runtime):
+    client, app, clock, _, _ = runtime
+    policy(runtime)
+    # New semantics: the daily greeting no longer enqueues a standalone
+    # candidate. It rides along the first boundary dispatch of the local day
+    # and is recorded as a companion.ritual event at dispatch time.
+    observe(runtime)
+    access = client.post(
+        "/v1/nodes/access/web",
+        json={
+            "browser_id": "test",
+            "access_id": "access-1",
+            "label": "test",
+            "kind": "desktop",
+            "bind_node_id": "desk",
+        },
+    )
+    assert access.status_code == 201, access.text
+    assert app.state.proactivity.process_next()["status"] == "awaiting_generation"
+    events = _ritual_events(client, "morning")
+    assert len(events) == 1
+    # The greeting is visible to the model as an appended note, not forged
+    # user content.
+    page = client.get(
+        "/v1/companions/sui/proactivity/output"
+        "?node_id=desk&access_id=access-1&epoch=1&after_sequence=0"
+    ).json()
+    assert page["items"]
+    assert "第一条主动消息" in page["items"][-1]["context_text"]
+    # A second dispatch on the same local day does not greet again.
+    command_id = decisions(runtime)[0]["command_id"]
+    commit = client.post(
+        f"/v1/companions/sui/dialogue/{command_id}/commit",
+        json={"assistant_message": "歇一会儿。", "usage": None},
+    )
+    assert commit.status_code == 200, commit.text
+    observe(runtime, sequence=2)
+    app.state.proactivity.process_next()
+    assert len(_ritual_events(client, "morning")) == 1
+    # A new local day greets again.
+    clock.value += timedelta(days=1)
+    observe(runtime, sequence=3)
+    app.state.proactivity.process_next()
+    assert len(_ritual_events(client, "morning")) == 2
+
+
+def test_anniversary_ritual_matches_marked_date(runtime):
+    client, app, clock, _, _ = runtime
+    policy(runtime)
+    created = client.post(
+        "/v1/companions/sui/calendar-marks",
+        json={"command_id": "mark-1", "month_day": "01-01", "label": "初次见面"},
+    )
+    assert created.status_code == 201, created.text
+    app.state.proactivity.process_next()
+    anniversaries = _ritual_events(client, "anniversary")
+    assert len(anniversaries) == 1
+    assert anniversaries[0]["payload"]["label"] == "初次见面"
+    assert anniversaries[0]["payload"]["mark_id"] == created.json()["mark"]["mark_id"]
+    # Same year: no repeat even after a second pass.
+    app.state.proactivity.process_next()
+    assert len(_ritual_events(client, "anniversary")) == 1
+
+
+def test_morning_ritual_stays_silent_without_proactivity_policy(runtime):
+    client, app, _, _, _ = runtime
+    # Policy disabled: no ritual events, process_next stays None.
+    assert app.state.proactivity.process_next() is None
+    assert _ritual_events(client) == []
+
+
+def test_ritual_candidate_dispatches_with_context(runtime):
+    client, app, clock, provider, _ = runtime
+    policy(runtime)
+    created = client.post(
+        "/v1/companions/sui/calendar-marks",
+        json={"command_id": "mark-1", "month_day": "01-01", "label": "初次见面"},
+    )
+    assert created.status_code == 201, created.text
+    observe(runtime, boundary="none", boundary_id=None)
+    access = client.post(
+        "/v1/nodes/access/web",
+        json={
+            "browser_id": "test",
+            "access_id": "access-1",
+            "label": "test",
+            "kind": "desktop",
+            "bind_node_id": "desk",
+        },
+    )
+    assert access.status_code == 201, access.text
+    result = app.state.proactivity.process_next()
+    assert result["status"] == "awaiting_generation", result
+    item = decisions(runtime)[0]
+    assert item["origin"] == "ritual"
+    assert item["status"] == "running"
+    page = client.get(
+        "/v1/companions/sui/proactivity/output"
+        "?node_id=desk&access_id=access-1&epoch=1&after_sequence=0"
+    ).json()
+    assert page["items"]
+    context = page["items"][-1]["context_text"]
+    assert "初次见面" in context
+    command_id = item["command_id"]
+    commit = client.post(
+        f"/v1/companions/sui/dialogue/{command_id}/commit",
+        json={"assistant_message": "早上好。", "usage": None},
+    )
+    assert commit.status_code == 200
+    assert commit.json()["status"] == "completed"
