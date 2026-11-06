@@ -447,6 +447,7 @@ class TestRuntime(unittest.TestCase):
                 "ts": 1234,
             }
         )
+        runtime.wait_dispatched()
         self.assertEqual(len(api.dialogue_calls), 1)
         companion, payload = api.dialogue_calls[0]
         self.assertEqual(companion, "sui")
@@ -494,8 +495,8 @@ class TestRuntime(unittest.TestCase):
             self.assertEqual(
                 list(runtime._send_queue),
                 [
-                    ("!room1:matrix.example.org", "嗯，看到了。"),
-                    ("!room1:matrix.example.org", "那一栏挺简洁的。"),
+                    ("!room1:matrix.example.org", "嗯，看到了。", None),
+                    ("!room1:matrix.example.org", "那一栏挺简洁的。", None),
                 ],
             )
         # drain_sends paces ONE bubble per cycle; the second call inside the
@@ -708,7 +709,9 @@ class TestPacing(unittest.TestCase):
     def test_failure_retries_with_exponential_backoff_then_succeeds(self):
         client = FlakyMatrix(fail_times=2)
         runtime, _, _ = self._runtime(
-            client, send_max_retries=2, retry_backoff_initial_seconds=2,
+            client,
+            send_max_retries=2,
+            retry_backoff_initial_seconds=2,
             send_interval_jitter_seconds=0,
         )
         runtime._send_text("!r:x", "hi")
@@ -719,7 +722,9 @@ class TestPacing(unittest.TestCase):
     def test_retries_exhausted_merges_remaining_bubbles_into_one(self):
         client = FlakyMatrix(fail_times=1)
         runtime, _, _ = self._runtime(
-            client, send_max_retries=0, send_interval_jitter_seconds=0,
+            client,
+            send_max_retries=0,
+            send_interval_jitter_seconds=0,
         )
         runtime._send_text("!r:x", "one")
         runtime._send_text("!r:x", "two")
@@ -731,7 +736,9 @@ class TestPacing(unittest.TestCase):
     def test_merge_keeps_bubbles_of_other_rooms(self):
         client = FlakyMatrix(fail_times=1)
         runtime, _, _ = self._runtime(
-            client, send_max_retries=0, send_interval_jitter_seconds=0,
+            client,
+            send_max_retries=0,
+            send_interval_jitter_seconds=0,
         )
         runtime._send_text("!r:x", "one")
         runtime._send_text("!other:x", "other-room")
@@ -739,7 +746,7 @@ class TestPacing(unittest.TestCase):
         # exhausted retries -> "one" is retried once as a merged single message
         self.assertEqual(client.sent, [("!r:x", "one")])
         with runtime._lock:
-            self.assertEqual(list(runtime._send_queue), [("!other:x", "other-room")])
+            self.assertEqual(list(runtime._send_queue), [("!other:x", "other-room", None)])
 
     def test_max_messages_per_reply_caps_bubbles(self):
         runtime, api, _ = self._runtime(max_messages_per_reply=2)
@@ -759,7 +766,10 @@ class TestPacing(unittest.TestCase):
         with runtime._lock:
             self.assertEqual(
                 list(runtime._send_queue),
-                [("!room1:matrix.example.org", "a"), ("!room1:matrix.example.org", "b")],
+                [
+                    ("!room1:matrix.example.org", "a", None),
+                    ("!room1:matrix.example.org", "b", None),
+                ],
             )
 
 
@@ -778,11 +788,129 @@ class TestSetTyping(unittest.TestCase):
         client.set_typing("!room:x", "@bot:matrix.example.org", 2500)
         request = opener.requests[0]
         self.assertEqual(request.get_method(), "PUT")
-        self.assertIn(
-            "/rooms/%21room%3Ax/typing/%40bot%3Amatrix.example.org", request.full_url
-        )
+        self.assertIn("/rooms/%21room%3Ax/typing/%40bot%3Amatrix.example.org", request.full_url)
         body = json.loads(request.data.decode("utf-8"))
         self.assertEqual(body, {"typing": True, "timeout": 2500})
+
+
+class TestDispatchAndTyping(unittest.TestCase):
+    def _runtime(self, **cfg_overrides):
+        path = Path("/tmp/mx_dispatch_config.json")
+        cfg = dict(CONFIG)
+        cfg.update(cfg_overrides)
+        path.write_text(json.dumps(cfg), encoding="utf-8")
+        config = load_config(path)
+        api = FakeApi()
+        client = FakeMatrix()
+        runtime = MatrixRuntime(config, api, client)
+        clock = FakeClock()
+        runtime._monotonic = clock.monotonic
+        runtime._sleep = clock.sleep
+        runtime._clock = clock
+        return runtime, api, client
+
+    @staticmethod
+    def _event():
+        return {
+            "room_id": "!room1:matrix.example.org",
+            "sender": "@user:matrix.example.org",
+            "type": "m.room.message",
+            "content": {"msgtype": "m.text", "body": "你好"},
+        }
+
+    def test_reply_delays_consumed_when_enabled(self):
+        runtime, api, _ = self._runtime()
+        api.dialogue_result = {
+            "status": "completed",
+            "assistant_message": "嗯，看到了。那一栏挺简洁的。",
+            "reply_messages": ["嗯，看到了。", "那一栏挺简洁的。"],
+            "reply_delays": [700, 2400],
+        }
+        runtime._handle_message(self._event())
+        with runtime._lock:
+            self.assertEqual(
+                list(runtime._send_queue),
+                [
+                    ("!room1:matrix.example.org", "嗯，看到了。", 0.7),
+                    ("!room1:matrix.example.org", "那一栏挺简洁的。", 2.4),
+                ],
+            )
+
+    def test_reply_delays_ignored_when_disabled(self):
+        runtime, api, _ = self._runtime(use_reply_delays=False)
+        api.dialogue_result = {
+            "status": "completed",
+            "assistant_message": "嗯，看到了。那一栏挺简洁的。",
+            "reply_messages": ["嗯，看到了。", "那一栏挺简洁的。"],
+            "reply_delays": [700, 2400],
+        }
+        runtime._handle_message(self._event())
+        with runtime._lock:
+            self.assertEqual(
+                list(runtime._send_queue),
+                [
+                    ("!room1:matrix.example.org", "嗯，看到了。", None),
+                    ("!room1:matrix.example.org", "那一栏挺简洁的。", None),
+                ],
+            )
+
+    def test_delayed_bubble_types_then_sleeps_delay(self):
+        runtime, _, client = self._runtime(typing_min_seconds=0.5, typing_chars_per_second=100)
+        runtime._send_text("!room1:matrix.example.org", "a", delay=2.0)
+        runtime.drain_sends()
+        # typing window covers the whole delay
+        self.assertEqual(client.typing[0][2], 2000)
+        self.assertEqual(client.sent, [("!room1:matrix.example.org", "a")])
+        self.assertIn(2.0, runtime._clock.sleeps)
+        # next delayed bubble needs no extra interval wait
+        runtime._send_text("!room1:matrix.example.org", "b", delay=1.0)
+        runtime.drain_sends()
+        self.assertEqual(len(client.sent), 2)
+        self.assertIn(1.0, runtime._clock.sleeps)
+
+    def test_dispatch_message_handles_event(self):
+        runtime, api, client = self._runtime()
+        api.dialogue_result = {
+            "status": "completed",
+            "assistant_message": "收到。",
+        }
+        runtime.dispatch_message(self._event())
+        # the fake clock's sleep/monotonic do not yield real time to the
+        # worker pool; use the real clock while waiting for dispatch
+        import time as _time
+
+        runtime._sleep = _time.sleep
+        runtime._monotonic = _time.monotonic
+        runtime.wait_dispatched(timeout=5)
+        self.assertEqual(len(api.dialogue_calls), 1)
+        runtime.drain_sends()
+        self.assertEqual(client.sent, [("!room1:matrix.example.org", "收到。")])
+
+    def test_typing_observation_reports_attention_and_throttles(self):
+        runtime, api, _ = self._runtime()
+        runtime.handle_typing("!room1:matrix.example.org", "@user:matrix.example.org")
+        self.assertEqual(len(api.attention_calls), 1)
+        # same room within the interval is throttled
+        runtime.handle_typing("!room1:matrix.example.org", "@user:matrix.example.org")
+        self.assertEqual(len(api.attention_calls), 1)
+        # after the interval passes, a new typing event reports again
+        runtime._clock.advance(runtime._clock.now + 10)
+        runtime.handle_typing("!room1:matrix.example.org", "@user:matrix.example.org")
+        self.assertEqual(len(api.attention_calls), 2)
+        sample = api.attention_calls[0]["sample"]
+        self.assertTrue(sample["user_present"])
+        self.assertEqual(sample["activity"], "chat")
+        self.assertEqual(sample["focus"], "focused")
+
+    def test_typing_observation_disabled(self):
+        runtime, api, _ = self._runtime(observe_typing=False)
+        runtime.handle_typing("!room1:matrix.example.org", "@user:matrix.example.org")
+        self.assertEqual(api.attention_calls, [])
+
+    def test_typing_from_own_user_ignored(self):
+        runtime, api, _ = self._runtime()
+        runtime.handle_typing("!room1:matrix.example.org", "@bot:matrix.example.org")
+        self.assertEqual(api.attention_calls, [])
 
 
 if __name__ == "__main__":

@@ -116,6 +116,10 @@ class MatrixConfig:
     retry_backoff_initial_seconds: float
     merge_on_limit: bool
     max_messages_per_reply: int
+    use_reply_delays: bool
+    handle_workers: int
+    observe_typing: bool
+    typing_attention_min_interval: float
     e2ee: bool
     e2ee_sidecar: str | None
     e2ee_config: dict[str, Any] | None
@@ -193,6 +197,10 @@ def load_config(path: Path) -> MatrixConfig:
         "retry_backoff_initial_seconds",
         "merge_on_limit",
         "max_messages_per_reply",
+        "use_reply_delays",
+        "handle_workers",
+        "observe_typing",
+        "typing_attention_min_interval",
         "e2ee",
         "e2ee_sidecar",
         "e2ee_config",
@@ -232,6 +240,12 @@ def load_config(path: Path) -> MatrixConfig:
     merge_on_limit = data.get("merge_on_limit", True)
     if not isinstance(merge_on_limit, bool):
         raise ConfigError("merge_on_limit_invalid")
+    use_reply_delays = data.get("use_reply_delays", True)
+    if not isinstance(use_reply_delays, bool):
+        raise ConfigError("use_reply_delays_invalid")
+    observe_typing = data.get("observe_typing", True)
+    if not isinstance(observe_typing, bool):
+        raise ConfigError("observe_typing_invalid")
     e2ee_config = data.get("e2ee_config")
     if e2ee_config is not None:
         object_fields(
@@ -298,6 +312,12 @@ def load_config(path: Path) -> MatrixConfig:
         merge_on_limit=merge_on_limit,
         max_messages_per_reply=int(
             number(data.get("max_messages_per_reply", 3), minimum=1, maximum=20)
+        ),
+        use_reply_delays=use_reply_delays,
+        handle_workers=int(number(data.get("handle_workers", 4), minimum=1, maximum=32)),
+        observe_typing=observe_typing,
+        typing_attention_min_interval=number(
+            data.get("typing_attention_min_interval", 8), minimum=0.5, maximum=3600
         ),
         e2ee=e2ee,
         e2ee_sidecar=e2ee_sidecar,

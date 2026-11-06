@@ -184,8 +184,7 @@ class MatrixClient:
     def set_typing(self, room_id: str, user_id: str, timeout_ms: int) -> dict[str, Any]:
         """PUT /rooms/{roomId}/typing/{userId}: set the typing notifier."""
         path = (
-            f"/_matrix/client/v3/rooms/{quote(room_id, safe='')}"
-            f"/typing/{quote(user_id, safe='')}"
+            f"/_matrix/client/v3/rooms/{quote(room_id, safe='')}/typing/{quote(user_id, safe='')}"
         )
         return self._request(
             "PUT", path, payload={"typing": True, "timeout": int(timeout_ms)}, auth=True
@@ -295,3 +294,38 @@ class MatrixEventStream:
                 item["room_id"] = room_id
                 events.append(item)
         return events
+
+    def typing_users(self) -> list[tuple[str, str]]:
+        """Return (room_id, user_id) pairs of users with an active m.typing
+        notifier in joined rooms (ephemeral events)."""
+        pairs: list[tuple[str, str]] = []
+        rooms = self._response.get("rooms", {})
+        if not isinstance(rooms, dict):
+            return pairs
+        joined = rooms.get("join", {})
+        if not isinstance(joined, dict):
+            return pairs
+        for room_id, state in joined.items():
+            if not isinstance(state, dict):
+                continue
+            ephemeral = state.get("ephemeral", {})
+            if not isinstance(ephemeral, dict):
+                continue
+            raw_events = ephemeral.get("events", [])
+            if not isinstance(raw_events, list):
+                continue
+            for event in raw_events:
+                if not isinstance(event, dict):
+                    continue
+                if event.get("type") != "m.typing":
+                    continue
+                content = event.get("content")
+                if not isinstance(content, dict):
+                    continue
+                user_ids = content.get("user_ids")
+                if not isinstance(user_ids, list):
+                    continue
+                for user_id in user_ids:
+                    if isinstance(user_id, str) and user_id:
+                        pairs.append((room_id, user_id))
+        return pairs

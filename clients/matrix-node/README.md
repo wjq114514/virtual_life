@@ -56,6 +56,9 @@ python3 matrix_node.py --config example.json
 - `sync_timeout_ms` 是 sync 长轮询超时（默认 30000）；`interval_seconds` 是心跳间隔。
 - **发送节奏**（可选，均为客户端本地配置）：`send_interval_min_seconds`（默认 `0.8`）条间最小间隔；`send_interval_jitter_seconds`（默认 `1.2`）条间 0..jitter 均匀随机抖动；`send_max_retries`（默认 `3`）发送失败重试次数；`retry_backoff_initial_seconds`（默认 `2`）指数退避初值（2s、4s、8s…）；`merge_on_limit`（默认 `true`）退避耗尽后把同一房间的剩余段落合并为一条再发一次；`max_messages_per_reply`（默认 `3`，与服务端 `dialogue.reply_split_max_messages` 对齐）客户端侧拆条上限。服务端 `reply_messages` 已拆条时逐条发送，未拆条时退回整条单发。
 - **typing**：`typing_before_send`（默认 `true`）在每条消息发送前先 `PUT /rooms/{id}/typing/{user}` 置输入状态；`typing_min_seconds`（默认 `0.5`）最短输入时长，`typing_chars_per_second`（默认 `12`）按长度估计输入时长 `max(typing_min, len/chars_per_second)`。typing 失败只记日志，不阻塞发送。
+- **打字节奏（服务端 reply_delays）**：`use_reply_delays`（默认 `true`）消费服务端 `DialogueResult.reply_delays`（毫秒数组，见 docs/protocol.md），每条消息按该延迟发出，typing 状态全程覆盖延迟窗口；无该字段或字段关闭时退回 `send_interval_min_seconds`+jitter 本地节奏。
+- **并发与即时性**：`handle_workers`（默认 `4`）收信处理线程池大小——收信后立刻派发到线程池触发对话全流程，慢回复不再阻塞 sync 长轮询与其他房间；同房间按到达顺序串行，不同房间并行。回复发送由独立 sender 线程处理：入队即发，不等下一次 sync 轮次。
+- **输入观察**：`observe_typing`（默认 `true`）监听 m.typing 事件，用户开始输入即上报注意力（user_present+typing）；`typing_attention_min_interval`（默认 `8` 秒）同一房间两次上报的最小间隔，避免刷屏。
 
 Matrix 事件映射：
 
