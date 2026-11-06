@@ -722,6 +722,21 @@ class InnerLifeService:
             self.personality._companion(connection, companion_id)
             return self.snapshot(connection, companion_id, self.personality._now())
 
+    def peek(self) -> str | None:
+        """Look at the device once on demand; None when unavailable.
+
+        A curiosity helper for callers outside the tick loop: same bounded
+        adb dumpsys read the look action uses, returning the friendly
+        foreground-app label or None (offline device, no serial, disabled
+        actions). Pure perception, never a gate and never an event.
+        """
+        if not self.policy.action_enabled:
+            return None
+        serial = self.policy.action_adb_serial
+        if not serial or not _adb_device_online(serial):
+            return None
+        return _app_label(_foreground_app(serial))
+
     def current(self, companion_id):
         companion_id = self.personality._identifier(companion_id)
         with self.store.transaction() as connection:

@@ -99,6 +99,8 @@ availability 为 available/busy/unknown。activity 支持 code/docs/chat/meeting
 
 `origin=attention` 的候选来自明确的宿主边界；`origin=inner` 的候选来自本地心理活动。两者共用队列、限额、提示预算、输出回执与中断检查，但后者不把活动内容当作用户发言或事实。决策与输出读取应展示 `origin`，不要伪造 `source_event_id` 的语义。
 
+curious 活动是一个特例：候选冲动本身说明"想看看周围"，派发前服务端会先调一次 `inner_life.peek()`（复用动作系统的 adb 感知，读当前前台应用名），成功时把"你刚才好奇地看了一眼手机屏幕，现在打开的是某应用"作为亲见事实注入提示；peek 失败或不满足门槛则保持原提示，不虚构任何屏幕内容。
+
 策略默认值：
 
 ```json

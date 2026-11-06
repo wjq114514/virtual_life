@@ -1501,11 +1501,65 @@ class ProactivityService:
                     replied=False,
                 )
 
+    _LONELINESS_IDLE_SECONDS = 24 * 3600
+    _LONELINESS_NEGLECT_SECONDS = 72 * 3600
+
+    def _loneliness_check(self, connection, now) -> None:
+        """Let a long silence from the user register emotionally, once.
+
+        One quiet day reads as a mild dip ("she's busy"); three days reads as
+        being neglected. Both are keyed to the last user dialogue, so any new
+        message from the user starts a fresh span and the same stretch can
+        never be charged twice.
+        """
+        companions = connection.execute("SELECT companion_id FROM companions").fetchall()
+        for companion_row in companions:
+            companion_id = companion_row["companion_id"]
+            last = connection.execute(
+                """SELECT occurred_at FROM events WHERE type='companion.dialogue'
+                    AND companion_id=? ORDER BY sequence DESC LIMIT 1""",
+                (companion_id,),
+            ).fetchone()
+            if last is None:
+                continue
+            last_at = _instant(last["occurred_at"])
+            idle = (now - last_at).total_seconds()
+            level = None
+            if idle >= self._LONELINESS_NEGLECT_SECONDS:
+                level = "neglect"
+            elif idle >= self._LONELINESS_IDLE_SECONDS:
+                level = "idle"
+            if level is None:
+                continue
+            if connection.execute(
+                """SELECT 1 FROM events WHERE type='companion.loneliness'
+                    AND companion_id=? AND occurred_at > ?""",
+                (companion_id, last["occurred_at"]),
+            ).fetchone():
+                continue
+            loneliness_event = self.coordinator._emit(
+                connection,
+                now,
+                "companion.loneliness",
+                {"level": level, "idle_seconds": int(idle)},
+                companion_id=companion_id,
+            )
+            emotion = self.dialogue.emotion_service
+            if emotion is not None:
+                emotion.loneliness(
+                    connection,
+                    companion_id,
+                    loneliness_event["event_id"],
+                    now,
+                    level=level,
+                )
+
     def process_next(self, companion_id=None):
         with self.store.transaction(write=True) as connection:
             now = self.coordinator._now()
             self._recover(connection, now)
             self._feedback_timeouts(connection, now)
+            self._loneliness_check(connection, now)
             self._enqueue_tasks(connection, now)
             self._enqueue_scheduled(connection, now)
             self._enqueue_inner(connection, now)
@@ -1551,10 +1605,28 @@ class ProactivityService:
                     (row["source_activity_id"],),
                 ).fetchone()
             content = activity["content"] if activity is not None else "我想说句话。"
+            peek_note = ""
+            if (
+                activity is not None
+                and activity["kind"] == "curious"
+                and self.inner_life is not None
+                and float(activity["salience"] or 0.0)
+                >= self.inner_life.policy.action_curious_min_salience
+            ):
+                try:
+                    app = self.inner_life.peek()
+                except Exception:
+                    app = None
+                if app:
+                    peek_note = (
+                        f" 你刚才好奇地看了一眼手机屏幕，现在打开的是“{app}”。"
+                        " 这是你亲眼看到的，可以自然地提一句，不要编造屏幕上的其他内容。"
+                    )
             user_message = (
                 "这是你自己刚产生的一段内在活动，不是用户发言，也不是用户事实："
                 + content
                 + " 只有在自然合适时才简短开口，不要复述这段内部说明，也不要声称知道用户未提供的事情。"
+                + peek_note
             )
         elif row["origin"] == "task":
             task = None

@@ -664,3 +664,36 @@ def test_asleep_companion_does_not_touch_the_phone(runtime, monkeypatch):
     clock.value += timedelta(hours=17)
     assert service._maybe_action("sui", clock.value) is None
     assert len(calls) == 1
+
+
+def test_peek_returns_foreground_app_label(monkeypatch):
+    service = inner_life_module.InnerLifeService.__new__(inner_life_module.InnerLifeService)
+    service.policy = InnerLifePolicy(
+        action_enabled=True, action_adb_serial="emu", action_open_app_whitelist=()
+    )
+    monkeypatch.setattr(inner_life_module, "_adb_device_online", lambda serial: True)
+    monkeypatch.setattr(
+        inner_life_module, "_foreground_app", lambda serial: "com.google.android.deskclock"
+    )
+    assert service.peek() == "时钟"
+
+
+def test_peek_none_when_disabled_offline_or_unknown(monkeypatch):
+    service = inner_life_module.InnerLifeService.__new__(inner_life_module.InnerLifeService)
+    service.policy = InnerLifePolicy(
+        action_enabled=False, action_adb_serial="emu", action_open_app_whitelist=()
+    )
+    monkeypatch.setattr(inner_life_module, "_adb_device_online", lambda serial: True)
+    monkeypatch.setattr(inner_life_module, "_foreground_app", lambda serial: "com.android.settings")
+    assert service.peek() is None  # actions disabled
+
+    service.policy = InnerLifePolicy(
+        action_enabled=True, action_adb_serial="emu", action_open_app_whitelist=()
+    )
+    monkeypatch.setattr(inner_life_module, "_adb_device_online", lambda serial: False)
+    assert service.peek() is None  # device offline
+
+    service.policy = InnerLifePolicy(
+        action_enabled=True, action_adb_serial="", action_open_app_whitelist=()
+    )
+    assert service.peek() is None  # no serial

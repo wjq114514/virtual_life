@@ -832,3 +832,125 @@ def test_inner_preflight_survives_device_switch(runtime):
     clock.value += timedelta(hours=1)
     with proact.store.transaction() as connection:
         assert proact._inner_preflight(connection, companion, activity, clock.value) is False
+
+
+def test_curious_inner_message_peeks_at_screen_before_speaking(runtime):
+    """P1 #4: a curious inner activity looks at the phone once, then carries
+    what it actually saw into the proactive prompt (no invention allowed)."""
+    policy(runtime, cooldown_seconds=60, daily_limit=5)
+    client, app, clock, provider, state = runtime
+    client.post(
+        "/v1/companions/sui/personality/state",
+        json={
+            "command_id": "mood-2",
+            "expected_revision": 0,
+            "state": {"mood": "curious", "energy": 0.6},
+            "ttl_seconds": 86_400,
+        },
+    )
+    talk = client.post(
+        "/v1/companions/sui/dialogue",
+        json={
+            "command_id": "user-talk-2",
+            "node_id": "desk",
+            "epoch": state["epoch"],
+            "expected_revision": state["revision"],
+            "user_message": "在忙，一会儿再聊",
+        },
+    )
+    assert talk.status_code == 200, talk.text
+    clock.value += timedelta(seconds=4_200)
+    created = clock.value.isoformat()
+    expires = (clock.value + timedelta(hours=24)).isoformat()
+    with app.state.coordinator.store.transaction() as connection:
+        row = connection.execute(
+            "SELECT event_id FROM events WHERE companion_id='sui' ORDER BY sequence DESC LIMIT 1"
+        ).fetchone()
+        source_event_id = row["event_id"] if row else "evt-curious-1"
+        connection.execute(
+            """INSERT INTO inner_activities
+                (activity_id, companion_id, kind, trigger, content, salience, urge,
+                 attention_session_id, attention_boundary_id, context_version,
+                 source_event_id, generator, model_json, thinking, status, created_at, expires_at)
+                VALUES ('ina-curious-1', 'sui', 'curious', 'curiosity',
+                        '想看看你的手机上在放什么', 0.6, 0.8, NULL, NULL, 'v1',
+                        ?, 'rules_v1', NULL, NULL, 'active', ?, ?)""",
+            (source_event_id, created, expires),
+        )
+    monkey_target = app.state.inner_life
+    monkey_target.peek = lambda: "设置"
+    captured: list[str] = []
+    dialogue = app.state.dialogue
+    original = dialogue.send_proactive
+
+    def spy(companion_id, payload):
+        captured.append(payload["user_message"])
+        return original(companion_id, payload)
+
+    dialogue.send_proactive = spy
+    observe(runtime, boundary="none", boundary_id=None)
+    result = app.state.proactivity.process_next()
+    assert result["status"] == "awaiting_generation", result
+    assert len(captured) == 1
+    assert "设置" in captured[0]
+    assert "你刚才好奇地看了一眼手机屏幕" in captured[0]
+    assert "不要编造" in captured[0]
+
+
+def test_curious_inner_message_without_peek_keeps_prompt_plain(runtime):
+    """peek() unavailable (device offline) -> no fabricated screen facts."""
+    policy(runtime, cooldown_seconds=60, daily_limit=5)
+    client, app, clock, provider, state = runtime
+    client.post(
+        "/v1/companions/sui/personality/state",
+        json={
+            "command_id": "mood-3",
+            "expected_revision": 0,
+            "state": {"mood": "curious", "energy": 0.6},
+            "ttl_seconds": 86_400,
+        },
+    )
+    talk = client.post(
+        "/v1/companions/sui/dialogue",
+        json={
+            "command_id": "user-talk-3",
+            "node_id": "desk",
+            "epoch": state["epoch"],
+            "expected_revision": state["revision"],
+            "user_message": "在忙，一会儿再聊",
+        },
+    )
+    assert talk.status_code == 200, talk.text
+    clock.value += timedelta(seconds=4_200)
+    created = clock.value.isoformat()
+    expires = (clock.value + timedelta(hours=24)).isoformat()
+    with app.state.coordinator.store.transaction() as connection:
+        row = connection.execute(
+            "SELECT event_id FROM events WHERE companion_id='sui' ORDER BY sequence DESC LIMIT 1"
+        ).fetchone()
+        source_event_id = row["event_id"] if row else "evt-curious-2"
+        connection.execute(
+            """INSERT INTO inner_activities
+                (activity_id, companion_id, kind, trigger, content, salience, urge,
+                 attention_session_id, attention_boundary_id, context_version,
+                 source_event_id, generator, model_json, thinking, status, created_at, expires_at)
+                VALUES ('ina-curious-2', 'sui', 'curious', 'curiosity',
+                        '想看看你的手机上在放什么', 0.6, 0.8, NULL, NULL, 'v1',
+                        ?, 'rules_v1', NULL, NULL, 'active', ?, ?)""",
+            (source_event_id, created, expires),
+        )
+    app.state.inner_life.peek = lambda: None
+    captured: list[str] = []
+    dialogue = app.state.dialogue
+    original = dialogue.send_proactive
+
+    def spy(companion_id, payload):
+        captured.append(payload["user_message"])
+        return original(companion_id, payload)
+
+    dialogue.send_proactive = spy
+    observe(runtime, boundary="none", boundary_id=None)
+    result = app.state.proactivity.process_next()
+    assert result["status"] == "awaiting_generation", result
+    assert len(captured) == 1
+    assert "看了一眼手机屏幕" not in captured[0]
