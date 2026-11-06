@@ -272,6 +272,7 @@ class DialogueService:
         slow_variables=None,
         inner_life=None,
         autobiography=None,
+        style_eval=None,
         screen_service=None,
         model_router=None,
         scene_classifier=None,
@@ -299,6 +300,7 @@ class DialogueService:
         self.slow_variables = slow_variables
         self.inner_life = inner_life
         self.autobiography = autobiography
+        self.style_eval = style_eval
         self.screen_service = screen_service
         self.model_router = model_router
         self.scene_classifier = scene_classifier
@@ -621,6 +623,10 @@ class DialogueService:
     _ABSENCE_NOTE_SECONDS = 2 * 3600
     _SELF_AGE_BIRTHDAY_WINDOW_DAYS = 30
     _ABSENCE_REPAIR_SECONDS = 48 * 3600
+    # Narrated short-gap time sense: below this there is no note, above it the
+    # absence reunion path owns the narrative.
+    _RECENT_GAP_MIN_SECONDS = 5 * 60
+    _RECENT_GAP_MAX_SECONDS = 3 * 86400
 
     def _absence_reunion(
         self, connection, companion_id: str, node_id: str, received, now: datetime
@@ -710,6 +716,37 @@ class DialogueService:
                 "——可以自然地带出这份牵挂，但不要逐字复述。"
             )
         return note
+
+    def _recent_gap_note(self, connection, companion_id: str, now: datetime) -> str | None:
+        """Narrate the gap since the previous completed reply, when it is short.
+
+        Gaps at or beyond ``_ABSENCE_SECONDS`` are owned by the absence
+        reunion path; below the minimum there is nothing worth saying.
+        """
+        row = connection.execute(
+            """SELECT occurred_at FROM events
+            WHERE companion_id=? AND type='companion.dialogue_completed'
+            ORDER BY sequence DESC LIMIT 1""",
+            (companion_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        gap = (now - _instant(row["occurred_at"])).total_seconds()
+        if gap < self._RECENT_GAP_MIN_SECONDS or gap >= self._RECENT_GAP_MAX_SECONDS:
+            return None
+        minutes = int(gap // 60)
+        if minutes < 60:
+            return (
+                f"（时间感）你约 {minutes} 分钟前刚说过话——不用重新寒暄，"
+                "直接接上刚才的话题就好。"
+            )
+        hours, rest = divmod(minutes, 60)
+        if hours < 24:
+            tail = f"{hours} 小时" if rest == 0 else f"{hours} 小时 {rest} 分钟"
+            return f"（时间感）距你上次说话约 {tail}——可以轻带一句，再自然接上。"
+        days, leftover_hours = divmod(hours, 24)
+        tail = f"{days} 天" if leftover_hours == 0 else f"{days} 天 {leftover_hours} 小时"
+        return f"（时间感）距你上次说话约 {tail}——隔了这么久，问候一句再进入正题。"
 
     def _self_age_note(self, connection, companion_id: str, now: datetime) -> str | None:
         """A plain time fact: how long this companion has existed, plus the
@@ -994,7 +1031,17 @@ class DialogueService:
                     if self.autobiography is not None
                     else None
                 )
+                style_note = (
+                    self.style_eval.note(connection, companion_id)
+                    if self.style_eval is not None
+                    else None
+                )
                 self_age_note = self._self_age_note(connection, companion_id, self._now())
+                time_note = (
+                    None
+                    if proactive
+                    else self._recent_gap_note(connection, companion_id, self._now())
+                )
                 emotion = snapshots[2].get("emotion")
                 if (
                     not proactive
@@ -1034,7 +1081,9 @@ class DialogueService:
                 inner_activity=inner,
                 absence_note=absence_note,
                 self_age_note=self_age_note,
+                time_note=time_note,
                 autobiography_note=autobiography_note,
+                style_note=style_note,
             )
             mark("preview_ms")
             memory_retrieval = None
@@ -1080,7 +1129,9 @@ class DialogueService:
                     inner_activity=inner,
                     absence_note=absence_note,
                     self_age_note=self_age_note,
+                    time_note=time_note,
                     autobiography_note=autobiography_note,
+                    style_note=style_note,
                 )
             mark("recall_ms")
             if self.emotion_service is not None and not proactive:
@@ -1110,7 +1161,9 @@ class DialogueService:
                     inner_activity=inner,
                     absence_note=absence_note,
                     self_age_note=self_age_note,
+                    time_note=time_note,
                     autobiography_note=autobiography_note,
+                    style_note=style_note,
                 )
             mark("resonance_ms")
             screen_images = ()

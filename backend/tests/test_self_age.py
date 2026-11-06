@@ -103,3 +103,33 @@ def test_birthday_today(runtime):
     send(client, state, "four", "今天怎么样")
     context = provider.requests[-1].context_text
     assert "今天是用户的生日" in context
+
+
+def test_recent_gap_note_narrates_minutes(runtime):
+    client, app, clock, provider, state = runtime
+    send(client, state, "gap-1", "在忙吗")
+    state = _sync_state(client, state)
+    clock.value = clock.value + timedelta(minutes=40)
+    send(client, state, "gap-2", "回来了")
+    context = provider.requests[-1].context_text
+    assert "约 40 分钟前刚说过话" in context
+
+
+def test_recent_gap_note_skips_quick_followup(runtime):
+    client, app, clock, provider, state = runtime
+    send(client, state, "quick-1", "在吗")
+    state = _sync_state(client, state)
+    clock.value = clock.value + timedelta(minutes=1)
+    send(client, state, "quick-2", "嗯")
+    context = provider.requests[-1].context_text
+    assert "刚说过话" not in context
+
+
+def test_recent_gap_note_narrates_hours(runtime):
+    client, app, clock, provider, state = runtime
+    send(client, state, "hours-1", "晚安")
+    state = _sync_state(client, state)
+    clock.value = clock.value + timedelta(hours=5)
+    send(client, state, "hours-2", "早")
+    context = provider.requests[-1].context_text
+    assert "距你上次说话约 5 小时" in context

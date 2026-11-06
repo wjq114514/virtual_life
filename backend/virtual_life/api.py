@@ -178,6 +178,7 @@ from .slow_variables import (
     SlowVariableSnapshot,
 )
 from .speech_provider import SpeechProviderRegistry, build_speech_provider
+from .style_eval import StyleEvalService
 from .tools import (
     CancelScheduledTaskTool,
     DelegationTool,
@@ -450,6 +451,7 @@ def create_app(
         model_name=settings.model_name,
         enabled=bool(settings.model_name),
     )
+    style_eval = StyleEvalService(memory)
     vector_provider = embedding_provider
     if vector_provider is None and settings.embedding_base_url:
         vector_provider = CompatibleEmbeddingProvider(
@@ -506,6 +508,7 @@ def create_app(
         slow_variables=slow_variables,
         inner_life=inner_life,
         autobiography=autobiography,
+        style_eval=style_eval,
         screen_service=screen_vision,
         scene_classifier=scene_classifier,
         debounce_seconds=settings.dialogue_debounce_seconds,
@@ -686,6 +689,10 @@ def create_app(
                 await asyncio.to_thread(autobiography.process)
             except Exception:
                 logger.exception("Autobiography chapter generation failed")
+            try:
+                await asyncio.to_thread(style_eval.process)
+            except Exception:
+                logger.exception("Style evaluation failed")
             # Reclaim parked external jobs whose commit deadline passed so a
             # generator that dies mid-flight cannot hold a reservation forever.
             if settings.auto_memory_external:
@@ -906,6 +913,7 @@ def create_app(
     app.state.memory = memory
     app.state.automatic_memory = automatic_memory
     app.state.autobiography = autobiography
+    app.state.style_eval = style_eval
     app.state.embeddings = embeddings
     app.state.personality = personality
     app.state.emotion = emotion
