@@ -9032,6 +9032,26 @@
             "type": "array",
             "maxItems": 8,
             "title": "Aggregates"
+          },
+          "dedup_key": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 160
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dedup Key"
+          },
+          "vocabulary": {
+            "items": {
+              "$ref": "#/components/schemas/VocabularyEvidenceReference"
+            },
+            "type": "array",
+            "maxItems": 8,
+            "title": "Vocabulary"
           }
         },
         "additionalProperties": false,
@@ -9052,6 +9072,7 @@
               "open_proposal_exists",
               "cooldown_active",
               "cumulative_drift_exceeded",
+              "duplicate_evidence",
               "field_at_bound",
               "calibration_requires_phase_c",
               "model_semantics_required",
@@ -16660,6 +16681,35 @@
           "type"
         ],
         "title": "ValidationError"
+      },
+      "VocabularyEvidenceReference": {
+        "properties": {
+          "word": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Word"
+          },
+          "count": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Count"
+          },
+          "revision": {
+            "type": "integer",
+            "maximum": 9.223372036854776e+18,
+            "minimum": 0.0,
+            "title": "Revision"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "word",
+          "count",
+          "revision"
+        ],
+        "title": "VocabularyEvidenceReference"
       },
       "VoiceAsrConfig": {
         "properties": {

@@ -37,6 +37,7 @@ SkipReason = Literal[
     "open_proposal_exists",
     "cooldown_active",
     "cumulative_drift_exceeded",
+    "duplicate_evidence",
     "field_at_bound",
     "calibration_requires_phase_c",
     "model_semantics_required",
@@ -136,6 +137,12 @@ class CorrectionEvidenceReference(RequestModel):
     revision: int = Field(ge=1)
 
 
+class VocabularyEvidenceReference(RequestModel):
+    word: str = Field(min_length=1, max_length=128)
+    count: int = Field(ge=1)
+    revision: Version
+
+
 class EvolutionEvidence(RequestModel):
     window_days: int = Field(ge=1)
     sample_size: int = Field(ge=0)
@@ -143,6 +150,8 @@ class EvolutionEvidence(RequestModel):
     event_refs: list[Identifier] = Field(default_factory=list, max_length=16)
     correction_refs: list[CorrectionEvidenceReference] = Field(default_factory=list, max_length=16)
     aggregates: list[EvolutionAggregate] = Field(default_factory=list, max_length=8)
+    dedup_key: str | None = Field(default=None, max_length=160)
+    vocabulary: list[VocabularyEvidenceReference] = Field(default_factory=list, max_length=8)
 
 
 class PersonalityEvolutionProposal(RequestModel):
@@ -812,6 +821,7 @@ class PersonalityEvolutionService:
                 "field": "warmth",
                 "metric": "relationship_warmth",
                 "confidence": round(min(0.9, 0.5 + abs(warmth - 0.5) * 0.4), 6),
+                "dedup_event_refs": True,
                 "rationale": (
                     f"最近 {days} 天的情感均值显示关系温度为 {warmth:.2f}"
                     f"（阈值 {threshold:.2f}，样本 {sample_size} 条），"
@@ -847,7 +857,7 @@ class PersonalityEvolutionService:
         """High-frequency shared vocabulary settles into speech habits."""
         try:
             rows = connection.execute(
-                "SELECT word, count FROM vocabulary WHERE companion_id = ? "
+                "SELECT word, count, revision FROM vocabulary WHERE companion_id = ? "
                 "AND count >= ? ORDER BY count DESC, word LIMIT 1",
                 (companion_id, _HABIT_MIN_COUNT),
             ).fetchall()
@@ -857,6 +867,7 @@ class PersonalityEvolutionService:
             return None, None
         word = str(rows[0]["word"])
         count = int(rows[0]["count"])
+        revision = int(rows[0]["revision"])
         if not word or len(word) > _HABIT_WORD_CHARS:
             return None, None
         days = self._window_days()
@@ -866,6 +877,11 @@ class PersonalityEvolutionService:
         item = f"和{word}这个词很熟，聊起来会自然带出"
         if any(word in line for line in existing):
             return None, {"reason": "field_at_bound", "metric": "preference_repeat"}
+        dialogue_refs = connection.execute(
+            """SELECT event_id FROM events WHERE type = 'companion.dialogue_received'
+                AND companion_id = ? AND occurred_at >= ? ORDER BY sequence DESC LIMIT 16""",
+            (companion_id, _timestamp(self._window_start(now))),
+        ).fetchall()
         return (
             {
                 "field": "habits",
@@ -879,6 +895,11 @@ class PersonalityEvolutionService:
                 "evidence": {
                     "window_days": days,
                     "sample_size": count,
+                    "dedup_key": f"vocab:{word}",
+                    "vocabulary": [
+                        {"word": word, "count": count, "revision": revision},
+                    ],
+                    "event_refs": [row["event_id"] for row in dialogue_refs],
                     "aggregates": [
                         {
                             "metric": "shared_vocabulary",
@@ -1104,6 +1125,8 @@ class PersonalityEvolutionService:
                 return {"reason": "open_proposal_exists", "metric": candidate["metric"]}
         if self._cooldown_active(connection, companion_id, field, now):
             return {"reason": "cooldown_active", "metric": candidate["metric"]}
+        if self._duplicate_evidence(connection, companion_id, candidate, now):
+            return {"reason": "duplicate_evidence", "metric": candidate["metric"]}
         step = abs(
             sum(
                 operation["delta"]
@@ -1144,6 +1167,47 @@ class PersonalityEvolutionService:
         since = now - timedelta(seconds=self.policy.trait_cooldown_seconds)
         for patch, _ in self._accepted_patches(connection, companion_id, since):
             if field in self._patch_fields(patch):
+                return True
+        return False
+
+    def _duplicate_evidence(self, connection, companion_id, candidate, now) -> bool:
+        """The same evidence must not nudge a field twice.
+
+        Warmth candidates carry the aligned experience event ids: when every one
+        of them was already cited by an earlier proposal for the same metric
+        inside the trait window, the window has no new signal and the candidate
+        is a repeat. Vocabulary candidates dedup on the settled word, so the
+        same word cannot re-enter habits from the same counting window.
+        """
+        evidence = candidate.get("evidence") or {}
+        metric = candidate.get("metric")
+        since = _timestamp(self._window_start(now))
+        rows = connection.execute(
+            """SELECT evidence_json FROM personality_evolution_proposals
+                WHERE companion_id = ? AND created_at >= ? AND status != 'expired'""",
+            (companion_id, since),
+        ).fetchall()
+        if not rows:
+            return False
+        if candidate.get("dedup_event_refs"):
+            refs = [ref for ref in evidence.get("event_refs") or []]
+            if not refs:
+                return False
+            cited: set[str] = set()
+            for row in rows:
+                prior = json.loads(row["evidence_json"])
+                aggregates = prior.get("aggregates") or []
+                prior_metric = aggregates[0].get("metric") if aggregates else None
+                if prior_metric != metric:
+                    continue
+                cited.update(prior.get("event_refs") or [])
+            return all(ref in cited for ref in refs)
+        key = evidence.get("dedup_key")
+        if not key:
+            return False
+        for row in rows:
+            prior = json.loads(row["evidence_json"])
+            if prior.get("dedup_key") == key:
                 return True
         return False
 
@@ -1235,6 +1299,10 @@ class PersonalityEvolutionService:
                     "proposal_id": proposal_id,
                     "personality_revision": revision,
                     "proposal_revision": row["revision"],
+                    "evidence_refs": {
+                        "event_refs": (evidence.get("event_refs") or [])[:16],
+                        "dedup_key": evidence.get("dedup_key"),
+                    },
                 },
             )
             accepted = self._proposal_row(connection, companion_id, proposal_id)

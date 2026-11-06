@@ -93,6 +93,7 @@ flowchart LR
 - 自动提议不修改 `speech_style.language`、名字或身份；`{{char}}`/`{{user}}` 仍由渲染层单次替换。
 - 一个提议最多 4 个操作，只作用于不超过 2 个字段。
 - 同一字段的 `adjust_trait` 在 `trait_cooldown_seconds` 内不重复提议；滚动窗口内累计漂移不得超过 `max_cumulative_drift`。
+- 提议携带证据链：`evidence.dedup_key`（词汇提议为 `vocab:<词>`）与 `event_refs`；同一窗口内已引用过的事件/词汇不再重复提议（skip 原因 `duplicate_evidence`）。采纳事件 `companion.personality_evolution_accepted` 的 payload 带 `evidence_refs`（`event_refs` ≤16 与 `dedup_key`）。
 - 补丁应用后必须通过 `PersonalityDefinition` 校验；校验失败则提议在生成阶段即被丢弃并记录原因，不进入可采纳状态。
 
 ## 生成器

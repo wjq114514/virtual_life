@@ -520,3 +520,80 @@ def test_shared_vocabulary_settles_into_habits(runtime):
         "habits"
     ]
     assert any("夜航船" in habit for habit in habits)
+
+
+def _reject(client, proposal_id, command_id, personality_revision=0, proposal_revision=1):
+    return client.post(
+        f"/v1/companions/sui/personality/proposals/{proposal_id}/reject",
+        json={
+            "command_id": command_id,
+            "expected_personality_revision": personality_revision,
+            "expected_proposal_revision": proposal_revision,
+        },
+    )
+
+
+def _warmth_proposal(runtime):
+    client, app, _, _, _ = runtime
+    assert send(runtime, "dup-warm-1", "谢谢你听我说话").json()["status"] == "completed"
+    assert send(runtime, "dup-warm-2", "有你陪着真好").json()["status"] == "completed"
+    events = client.get("/v1/companions/sui/emotion/experiences").json()["items"]
+    source_event_id = events[0]["event_id"]
+    for index in range(12):
+        memory = client.post(
+            "/v1/companions/sui/memories",
+            json={
+                "command_id": f"dup-warm-mem-{index}",
+                "kind": "relationship",
+                "content": f"第{index + 1}段相处片段。",
+                "source_event_id": source_event_id,
+                "source_node_id": "desk",
+                "importance": 0.7,
+            },
+        )
+        assert memory.status_code == 201, memory.text
+    result = refresh(client, "dup-warm-gen").json()
+    return next(
+        proposal
+        for proposal in result["proposals"]
+        if proposal["evidence"]["aggregates"][0]["metric"] == "relationship_warmth"
+    )
+
+
+def test_warmth_evidence_not_recited_twice(runtime):
+    client, _, _, _, _ = runtime
+    proposal = _warmth_proposal(runtime)
+    assert _reject(client, proposal["proposal_id"], "dup-warm-rej").status_code == 200
+    result = refresh(client, "dup-warm-gen2").json()
+    skipped = {(item.get("reason"), item.get("metric")) for item in result.get("skipped", [])}
+    assert ("duplicate_evidence", "relationship_warmth") in skipped
+    assert result.get("generated", 0) == 0
+
+
+def test_vocabulary_word_not_reproposed_from_same_window(runtime):
+    client, app, _, _, _ = runtime
+    seed_vocabulary(app, "夜航船", 9)
+    result = refresh(client, "dup-vocab-gen").json()
+    proposal = next(
+        proposal
+        for proposal in result["proposals"]
+        if proposal["evidence"]["aggregates"][0]["metric"] == "shared_vocabulary"
+    )
+    assert proposal["evidence"]["dedup_key"] == "vocab:夜航船"
+    assert _reject(client, proposal["proposal_id"], "dup-vocab-rej").status_code == 200
+    result = refresh(client, "dup-vocab-gen2").json()
+    skipped = {(item.get("reason"), item.get("metric")) for item in result.get("skipped", [])}
+    assert ("duplicate_evidence", "shared_vocabulary") in skipped
+
+
+def test_accepted_event_carries_evidence_refs(runtime):
+    client, _, _, _, _ = runtime
+    proposal = _warmth_proposal(runtime)
+    assert accept(client, proposal["proposal_id"], "dup-warm-take", 0).status_code == 200
+    events = client.get("/v1/events?limit=500").json()["events"]
+    accepted = [
+        event for event in events if event["type"] == "companion.personality_evolution_accepted"
+    ]
+    assert accepted
+    refs = accepted[-1]["payload"].get("evidence_refs") or {}
+    assert refs.get("event_refs")
