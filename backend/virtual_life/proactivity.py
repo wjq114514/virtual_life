@@ -1516,7 +1516,7 @@ class ProactivityService:
         for companion_row in companions:
             companion_id = companion_row["companion_id"]
             last = connection.execute(
-                """SELECT occurred_at FROM events WHERE type='companion.dialogue'
+                """SELECT occurred_at FROM events WHERE type='companion.dialogue_received'
                     AND companion_id=? ORDER BY sequence DESC LIMIT 1""",
                 (companion_id,),
             ).fetchone()

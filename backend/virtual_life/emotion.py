@@ -83,6 +83,8 @@ Reason = Literal[
     "model_v1",
     "proactive_replied",
     "proactive_unanswered",
+    "loneliness_idle",
+    "loneliness_neglect",
 ]
 
 # Reactions whose experiences decay more slowly when negative_half_life_seconds
@@ -306,6 +308,55 @@ class EmotionService:
             "appraisal": {"uncertainty": 0.1},
             "appraisal_version": "proactive_feedback_v1",
             "uncertainty": 0.1,
+            "attribution": attribution,
+        }
+        connection.execute(
+            """INSERT INTO emotion_experiences
+            (event_id, companion_id, appraisal_json, created_at) VALUES (?, ?, ?, ?)""",
+            (event_id, companion_id, _json(appraisal), _timestamp(now)),
+        )
+        self._bump(connection, companion_id, event_id, now)
+
+    def loneliness(self, connection, companion_id, event_id, now, *, level):
+        """Record the felt cost of a long silence from the user.
+
+        A day of quiet is a mild dip ("she's just busy"); three days reads as
+        being neglected. ``event_id`` is the companion's ``companion.loneliness``
+        event, so the poll that scans idle spans cannot double-charge the same
+        stretch, and any new user dialogue naturally starts a fresh span.
+        """
+        if not self.policy.enabled:
+            return
+        if connection.execute(
+            "SELECT 1 FROM emotion_experiences WHERE event_id=?", (event_id,)
+        ).fetchone():
+            return
+        if level == "neglect":
+            reaction, reason, attribution = "concern", "loneliness_neglect", "other"
+            delta = {
+                "valence": -0.20,
+                "arousal": 0.10,
+                "control": 0.0,
+                "energy": -0.02,
+                "social_battery": -0.05,
+            }
+        else:
+            reaction, reason, attribution = "quiet", "loneliness_idle", "situation"
+            delta = {
+                "valence": -0.08,
+                "arousal": 0.0,
+                "control": 0.0,
+                "energy": -0.01,
+                "social_battery": -0.02,
+            }
+        appraisal = {
+            "reaction": reaction,
+            "reason": reason,
+            "confidence": 0.8,
+            "delta": delta,
+            "appraisal": {"uncertainty": 0.15},
+            "appraisal_version": "loneliness_v1",
+            "uncertainty": 0.15,
             "attribution": attribution,
         }
         connection.execute(

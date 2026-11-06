@@ -10,6 +10,8 @@
 
 仍使用有明确范围的整句模板：否定、引用、转述、假设、反问、讽刺和复杂多分句通常保持中性，不按关键词翻转情绪。探索允许限定长度的后缀，显式引用、假设或讽刺标记使其回到中性。安静请求优先。此实现没有训练语言分类器，也没有导入情绪词库数据。
 
+除用户消息外，还有两类非对话来源的情绪经历：主动消息反馈（`proactive_replied`/`proactive_unanswered`，见 [proactivity.md](proactivity.md) 反馈闭环）与长时安静（`loneliness_idle`/`loneliness_neglect`）。安静超过 24 小时写一条 `quiet`/`loneliness_idle` 轻度低落（她只是忙）；超过 72 小时读作被冷落，写 `concern`/`loneliness_neglect`（`appraisal_version="loneliness_v1"`）。两者都由 `process_next` 周期扫描、按"上次用户消息之后"幂等各发生一次；用户新对话天然开启新的安静段。这些是生命体自身的状态信号，不从用户消息推断。
+
 | appraisal 字段 | 范围 | 规则解释 |
 | --- | --- | --- |
 | pleasantness | -1..1 | 线索的愉快性 |

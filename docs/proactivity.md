@@ -135,6 +135,8 @@ daily_limit 为 1..20，cooldown_seconds 为 30..86400，candidate_ttl_seconds �
 
 主动输出之后有一条独立的反馈闭环，不改变上述边界。completed 后 6 小时内用户发来新对话时，若该候选尚无回执，服务端写一条 `companion.proactive_feedback` 事件（`replied=true`、`latency_seconds`）并落一条 `proactive_replied` 情绪经历（joy、轻微正向效价），让"主动开口被回应"成为可累积的心理事件。无回应的 completed 在 2 小时后由 `process_next` 扫描补一条 `replied=false` 事件与 `proactive_unanswered` 经历（concern、轻微负向，按负性半衰自然消退）。两种回写都按 candidate 幂等，各只发生一次，且从不阻塞或改变对话轮本身的输出 gate。
 
+同一个 `process_next` 周期还会做长时安静检查：距该伴侣上一次用户对话（`companion.dialogue_received`）超过 24 小时写一条 `companion.loneliness` 事件（`level="idle"`，`idle_seconds`）与 `loneliness_idle` 轻度低落经历；超过 72 小时升级为 `level="neglect"` 与更深的 `loneliness_neglect`。事件按"上次用户消息之后"幂等，用户新对话天然重置安静段；它只反映生命体自身状态，不作为主动输出的触发条件，也不推断用户。
+
 生成前与提交前都重验最新注意力、策略、模式、用户对话、迁移、人格/状态/记忆版本、epoch 与租约。执行中重新进入专注或共享屏幕，结果标记 discarded，assistant_message=null；实际用量照常结算。
 
 completed 是历史结果。宿主重放时不能直接显示旧问候；应核对候选有效期、当前策略与最新注意力、人格状态及记忆版本，并经现有 OutputHandle/LeaseGate 检查当前节点、epoch 与新鲜租约。本地锁屏、会议或静默应直接停止主动显示。SDK 提供类型与 REST 方法；Android 采集、通知、悬浮窗和主动文字呈现仍由宿主实现。WebUI 可显式修改主动策略、查看连续专注建议与最新决策，并通过实时输出页显示主动文字；不自动采集注意力，也不自动朗读。

@@ -188,3 +188,69 @@ def test_reply_after_window_does_not_credit(runtime):
         for item in experiences
         if item["reason"] in {"proactive_replied", "proactive_unanswered"}
     ]
+
+
+def _loneliness_events(client):
+    events = client.get("/v1/events?limit=500").json()["events"]
+    return [event for event in events if event["type"] == "companion.loneliness"]
+
+
+def test_loneliness_idle_after_quiet_day(runtime):
+    client, app, clock, provider, state = runtime
+    send(client, state, "one", "在忙，一会儿再聊")
+
+    clock.value += timedelta(hours=25)
+    app.state.proactivity.process_next()
+
+    lonely = _loneliness_events(client)
+    assert len(lonely) == 1
+    assert lonely[0]["payload"]["level"] == "idle"
+    assert lonely[0]["payload"]["idle_seconds"] >= 24 * 3600
+    experiences = client.get("/v1/companions/sui/emotion/experiences").json()["items"]
+    item = [entry for entry in experiences if entry["event_id"] == lonely[0]["event_id"]]
+    assert len(item) == 1
+    assert item[0]["reaction"] == "quiet"
+    assert item[0]["reason"] == "loneliness_idle"
+
+    # Idempotent within the same quiet span.
+    app.state.proactivity.process_next()
+    assert len(_loneliness_events(client)) == 1
+
+
+def test_loneliness_escalates_to_neglect(runtime):
+    client, app, clock, provider, state = runtime
+    send(client, state, "one", "在忙，一会儿再聊")
+
+    clock.value += timedelta(hours=73)
+    app.state.proactivity.process_next()
+
+    lonely = _loneliness_events(client)
+    assert len(lonely) == 1
+    assert lonely[0]["payload"]["level"] == "neglect"
+    experiences = client.get("/v1/companions/sui/emotion/experiences").json()["items"]
+    item = [entry for entry in experiences if entry["event_id"] == lonely[0]["event_id"]]
+    assert item[0]["reaction"] == "concern"
+    assert item[0]["reason"] == "loneliness_neglect"
+
+    app.state.proactivity.process_next()
+    assert len(_loneliness_events(client)) == 1
+
+
+def test_new_message_starts_fresh_loneliness_span(runtime):
+    client, app, clock, provider, state = runtime
+    send(client, state, "one", "在忙，一会儿再聊")
+
+    clock.value += timedelta(hours=25)
+    app.state.proactivity.process_next()
+    assert len(_loneliness_events(client)) == 1
+
+    clock.value += timedelta(minutes=10)
+    fresh = client.get("/v1/companions/sui").json()
+    send(client, fresh, "two", "回来了")
+    assert len(_loneliness_events(client)) == 1
+
+    clock.value += timedelta(hours=25)
+    app.state.proactivity.process_next()
+    lonely = _loneliness_events(client)
+    assert len(lonely) == 2
+    assert lonely[1]["payload"]["level"] == "idle"

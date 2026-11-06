@@ -8547,7 +8547,9 @@
               "quiet_request",
               "model_v1",
               "proactive_replied",
-              "proactive_unanswered"
+              "proactive_unanswered",
+              "loneliness_idle",
+              "loneliness_neglect"
             ],
             "title": "Reason"
           },
