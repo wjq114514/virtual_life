@@ -962,3 +962,24 @@ class TestLeaseRenew(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_check_config_reports_valid_offline_configuration(tmp_path, caplog):
+    import logging
+
+    from matrix_node.cli import main
+
+    config = tmp_path / "matrix.json"
+    config.write_text(json.dumps({**CONFIG, "rooms": []}), encoding="utf-8")
+    with caplog.at_level(logging.INFO):
+        assert main(["--config", str(config), "--check-config"]) == 0
+    assert "configuration_valid" in caplog.text
+    assert "no_room_bindings" in caplog.text
+
+
+def test_check_config_rejects_invalid_configuration(tmp_path):
+    from matrix_node.cli import main
+
+    config = tmp_path / "matrix.json"
+    config.write_text("{}", encoding="utf-8")
+    assert main(["--config", str(config), "--check-config"]) == 2

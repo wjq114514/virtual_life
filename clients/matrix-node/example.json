@@ -16,14 +16,14 @@
   ],
   "interval_seconds": 30,
   "sync_timeout_ms": 30000,
-  "request_timeout_seconds": 10,
+  "request_timeout_seconds": 180,
   "max_history": 6,
   "max_output_tokens": 512,
   "e2ee": false,
   "e2ee_sidecar": null,
   "e2ee_config": null,
   "screen_observer_node": null,
-  "maintain_node": false,
+  "maintain_node": true,
   "send_interval_min_seconds": 0.8,
   "send_interval_jitter_seconds": 1.2,
   "typing_before_send": true,
@@ -32,5 +32,7 @@
   "send_max_retries": 3,
   "retry_backoff_initial_seconds": 2,
   "merge_on_limit": true,
-  "max_messages_per_reply": 3
+  "max_messages_per_reply": 3,
+  "lease_renew_seconds": 5,
+  "use_reply_delays": true
 }

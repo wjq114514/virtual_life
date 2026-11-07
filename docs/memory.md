@@ -135,3 +135,18 @@ app = create_app(
 - **存储**：`style_evaluations` 表每次评估至多一行，含 `metrics_json` 与 `verdict`，供调试和 WebUI 后续可视化。
 
 评估结果只影响后续回复的语气倾向，不修改历史消息，也不写用户记忆。
+
+## 陈旧预留回收（stale reservation reaper）
+
+模型账本的每次调用先 `reserve_model_tokens` 预留、成功后 `settle_model_tokens` 结算、失败路径应 `release_model_tokens` 释放。但失败/崩溃的调用（如网关 5xx、进程重启）会留下永不结算也永不释放的 `reserved` 行，把当日 `daily_model_token_limit` 烧光，后续调用全部 409 `model_token_budget_exceeded`。
+
+兜底机制（`backend/virtual_life/memory.py`）：
+
+- 模块常量 `STALE_RESERVATION_TTL = timedelta(minutes=30)`：预留超过 30 分钟仍未结算/释放视为被遗弃（这是本地账本的回收期限，并非网关计费结论）。
+- `MemoryService._reap_stale_reservations(connection, day, now)`：把当日 `status='reserved' AND updated_at < cutoff` 的行批量改为 `released`（含 `released_at`）。
+- **自动触发**：每次 `reserve_model_tokens` 在预算检查前先收割当日陈旧预留——新调用天然清旧账，无需额外定时器。
+- **手工触发**：公开方法 `reap_model_reservations(day=None)`（默认今天）可在运维侧批量释放，返回收割行数。
+
+被收割的任务幂等语义不变：同 `task_id` 重放返回 `released` 状态；若 provider 事后完成，`settle_model_tokens` 仍可晚结算（`settled_after_release`）。
+
+自传生成已补齐失败分支：已知用量立即结算，明确未发出的调用立即释放；已发出但用量未知的失败保留预留直到回收期限。回收释放本地预留，不代表远端调用未计费；晚到的真实用量仍会入账。

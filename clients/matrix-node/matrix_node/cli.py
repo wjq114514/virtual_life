@@ -30,6 +30,14 @@ def main(argv: list[str] | None = None) -> int:
     try:
         config: MatrixConfig = load_config(args.config)
         if args.check_config:
+            LOGGER.info(
+                "configuration_valid node=%s rooms=%d e2ee=%s (offline; credentials not checked)",
+                config.node_id,
+                len(config.rooms),
+                config.e2ee,
+            )
+            if not config.rooms:
+                LOGGER.warning("no_room_bindings: configure rooms before testing replies")
             return 0
         token = read_token(config)
     except ConfigError as exc:
@@ -81,7 +89,6 @@ def main(argv: list[str] | None = None) -> int:
         if bridge is not None:
             bridge.stop()
         LOGGER.info("matrix_node_stopped")
-        return 0
 
 
 if __name__ == "__main__":

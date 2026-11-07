@@ -163,3 +163,53 @@ def test_due_gate_skips_recent_complete_chapter(tmp_path):
         clock.value = clock.value + timedelta(days=8)
         assert app.state.autobiography.process("sui") is None
         assert len(provider.requests) == before
+
+
+def test_autobiography_failed_provider_preserves_usage_or_releases(tmp_path):
+    from virtual_life.model_provider import ProviderError
+    from virtual_life.ports import ModelUsage
+
+    clock = Clock()
+    provider = Provider()
+    database, app = build_app(tmp_path, clock, provider)
+    service = app.state.autobiography
+
+    def fail_before_dispatch(request):
+        raise ProviderError("offline", "not sent", dispatched=False, releasable=True)
+
+    provider.complete = fail_before_dispatch
+    assert service._generate("sui", "context", "auto-not-sent") is None
+    assert (
+        rows(database, "SELECT status FROM memory_token_tasks WHERE task_id=?", ("auto-not-sent",))[
+            0
+        ]["status"]
+        == "released"
+    )
+
+    def fail_with_usage(request):
+        raise ProviderError(
+            "partial", "partial result", usage=ModelUsage(input_tokens=8, output_tokens=2)
+        )
+
+    provider.complete = fail_with_usage
+    assert service._generate("sui", "context", "auto-partial") is None
+    assert (
+        rows(database, "SELECT status FROM memory_token_tasks WHERE task_id=?", ("auto-partial",))[
+            0
+        ]["status"]
+        == "settled"
+    )
+
+    def fail_unknown(request):
+        raise ProviderError("timeout", "dispatch uncertain")
+
+    provider.complete = fail_unknown
+    assert service._generate("sui", "context", "auto-unknown") is None
+    assert (
+        rows(database, "SELECT status FROM memory_token_tasks WHERE task_id=?", ("auto-unknown",))[
+            0
+        ]["status"]
+        == "reserved"
+    )
+    clock.value += timedelta(minutes=31)
+    assert service.memory.reap_model_reservations() == 1

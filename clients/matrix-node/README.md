@@ -4,6 +4,53 @@
 
 参考 [AstrBot matrix adapter](https://github.com/stevessr/astrbot_plugin_matrix_adapter) 但**只实现 stdlib-only 子集**：密码/Token 认证、sync 长轮询、`m.text` 消息提取、`m.room.message` 发送、加入房间。**默认不实现** E2EE、SSO/OAuth2/QR、媒体、贴纸、线程、Reaction（如需要，请参考 AstrBot 完整实现）。
 
+## 首次配置与测试
+
+以下命令从仓库根目录执行。先在 Matrix 客户端注册独立机器人账号，创建测试房间并邀请机器人；初次联通可用未加密房间。加密房间另按下方 E2EE 流程配置。
+
+1. 复制配置，保留已有本地配置时跳过复制：
+
+   ```bash
+   cp -n clients/matrix-node/example.json clients/matrix-node/config.local.json
+   chmod 600 clients/matrix-node/config.local.json
+   ```
+
+2. 编辑本地配置：`server_url` 填 Virtual Life 地址；`homeserver` 填 Matrix homeserver 基址；`user_id` 填机器人完整 MXID；密码认证填 `password`，Token 认证设 `auth_method: "token"` 并填 `access_token`。两类凭证属于 Matrix，下面的环境变量属于 Virtual Life。
+3. `rooms[].room` 填客户端房间设置中的内部 ID（`!…:server`），或可加入的别名；`rooms[].companion` 填运行时已存在的伙伴 ID。`senders: ["@you:server"]` 可限制触发回复的人；省略表示处理房间内所有非机器人文本消息。
+4. 独立运行保持 `maintain_node: true`；已有 node-keep 才设 `false`。慢模型建议 `request_timeout_seconds: 180`（支持至 600），应大于 sync 长轮询时长。`lease_renew_seconds: 5` 应小于运行时租约 TTL。
+5. 离线检查配置，再前台启动：
+
+   ```bash
+   python3 clients/matrix-node/matrix_node.py --config clients/matrix-node/config.local.json --check-config
+   export VIRTUAL_LIFE_API_TOKEN='填写运行时API令牌'
+   python3 clients/matrix-node/matrix_node.py --config clients/matrix-node/config.local.json
+   ```
+
+`--check-config` 只验证文件结构，不登录、不访问模型，也不检查环境变量令牌。启动后看到 `registered node=`（自行维护节点时）和 `connected homeserver=`，再从允许的用户账号发送一条新消息；首次 sync 用于建立游标，历史消息不作为联通测试。等待一轮模型耗时，确认机器人回复进入同一房间。
+
+已有用户服务使用本地配置时，修改后执行：
+
+```bash
+systemctl --user restart matrix-node.service
+systemctl --user status matrix-node.service --no-pager
+journalctl --user -u matrix-node.service -n 40 --no-pager
+```
+
+服务须在自己的 Environment/EnvironmentFile 中设置 `VIRTUAL_LIFE_API_TOKEN`，终端 export 不会传给已配置的 systemd 服务。若 unit 使用 `StandardOutput=append:`，到对应文件查看业务日志。
+
+| 现象 | 检查点 |
+| --- | --- |
+| `configuration_invalid` | 字段拼写、JSON 格式、认证必填字段；配置不接受注释和未知字段 |
+| `token_missing_or_length_invalid` | 运行进程的 API 令牌环境变量 |
+| 登录或加入房间失败 | homeserver、机器人凭证、邀请、房间 ID |
+| `api_timeout` | 提高请求超时，并检查模型耗时 |
+| `lease_expired` | 续租间隔、节点归属与运行时租约 TTL |
+| `model_token_budget_exceeded` | 当日账本；陈旧预留在新预留时自动回收 |
+| `model_http_error` | 模型通道响应；配置检查不会探测通道 |
+| 已连接但没回复 | 新消息、senders 白名单、机器人自发消息过滤、E2EE 设置 |
+
+配置中含凭证，本地配置保持忽略状态，示例仅放占位值。
+
 ## E2EE（可选）
 
 `e2ee: true` 时启用端到端加密支持。此时运行一个 Node 边车进程（`e2ee/sidecar.js`），由 `matrix-js-sdk`（含 RustCrypto WASM）负责 Olm/Megolm 密钥交换与解密/加密；Python 侧只做 stdio 桥接。边车监听 `RoomTimeline`（事件入 timeline 时）与 `MatrixEventEvent.Decrypted`（megolm key 稍后经 to-device 到达、解密成功时）两类信号，解密后以明文 `message` 事件上报，运行时与普通 `m.room.message` 走同一对话路径；发送经 `send` 命令交由边车加密投递。

@@ -16,6 +16,7 @@ import uuid
 from datetime import datetime, timedelta
 
 from .memory import MemoryError
+from .model_provider import ProviderError
 from .ports import ModelRequest
 
 _SCHEMA = (
@@ -195,7 +196,7 @@ class AutobiographyService:
         if self.provider is None or not self.model_name.strip():
             return None
         try:
-            self.memory.reserve_model_tokens(
+            hold = self.memory.reserve_model_tokens(
                 companion_id,
                 {
                     "task_id": task_id,
@@ -206,17 +207,33 @@ class AutobiographyService:
             )
         except MemoryError:
             return None
-        answer = self.provider.complete(
-            ModelRequest(
-                task_id=task_id,
-                companion_id=companion_id,
-                purpose="autobiography",
-                model=self.model_name,
-                context_text=context,
-                input_token_limit=4096,
-                output_token_limit=self.output_token_limit,
+        if not hold["new_reservation"]:
+            return None
+        try:
+            answer = self.provider.complete(
+                ModelRequest(
+                    task_id=task_id,
+                    companion_id=companion_id,
+                    purpose="autobiography",
+                    model=self.model_name,
+                    context_text=context,
+                    input_token_limit=4096,
+                    output_token_limit=self.output_token_limit,
+                )
             )
-        )
+        except ProviderError as exc:
+            if exc.usage is not None:
+                self.memory.settle_model_tokens(
+                    companion_id,
+                    task_id,
+                    {
+                        "input_tokens": exc.usage.input_tokens,
+                        "output_tokens": exc.usage.output_tokens,
+                    },
+                )
+            elif exc.releasable:
+                self.memory.release_model_tokens(companion_id, task_id)
+            return None
         usage = (answer.usage.input_tokens, answer.usage.output_tokens)
         if any(type(count) is not int or not 0 <= count <= 1_000_000_000 for count in usage):
             return None

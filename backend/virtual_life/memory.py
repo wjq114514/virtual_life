@@ -15,7 +15,7 @@ import unicodedata
 import uuid
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from time import perf_counter
 from typing import Annotated, Literal, TypeVar
@@ -352,6 +352,8 @@ class ApproximateTokenEstimator:
         )
         return cjk + math.ceil(other_bytes / 4)
 
+
+STALE_RESERVATION_TTL = timedelta(minutes=30)
 
 _SCHEMA = (
     """CREATE TABLE IF NOT EXISTS memory_records (
@@ -2018,6 +2020,29 @@ class MemoryService:
             "token_quota": quota,
         }
 
+    def reap_model_reservations(self, day: str | None = None) -> int:
+        """Release stale reserved holds for the given day (default today).
+
+        Failed or crashed provider jobs can leave ``reserved`` rows that never
+        settle or release; older-than-TTL holds are treated as abandoned so a
+        flaky gateway cannot burn the whole daily quota with dead reservations.
+        """
+        day = day or self._now().date().isoformat()
+        with self._tx(write=True) as connection:
+            return self._reap_stale_reservations(connection, day, self._now())
+
+    def _reap_stale_reservations(
+        self, connection: sqlite3.Connection, day: str, now: datetime
+    ) -> int:
+        cutoff = self._timestamp(now - STALE_RESERVATION_TTL)
+        timestamp = self._timestamp(now)
+        cursor = connection.execute(
+            """UPDATE memory_token_tasks SET status = 'released', updated_at = ?, released_at = ?
+               WHERE status = 'reserved' AND day = ? AND updated_at < ?""",
+            (timestamp, timestamp, day, cutoff),
+        )
+        return cursor.rowcount if cursor.rowcount and cursor.rowcount > 0 else 0
+
     def reserve_model_tokens(
         self, companion_id: str, payload: dict, *, via: sqlite3.Connection | None = None
     ) -> dict:
@@ -2054,6 +2079,7 @@ class MemoryService:
                     "per_task_token_limit",
                     "Reservation exceeds the per-task model token limit",
                 )
+            self._reap_stale_reservations(connection, day, now)
             quota = self._budget_snapshot(connection, companion_id, day)
             if tokens > quota["remaining_tokens"]:
                 raise MemoryError(

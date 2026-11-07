@@ -332,6 +332,56 @@ def test_quota_reservation_release_settlement_and_restart(tmp_path):
     assert restarted.budget_snapshot("sui", "2020-01-01")["spent_tokens"] == 26
 
 
+def test_stale_reservations_are_reaped_and_free_budget(tmp_path):
+    clock = Clock()
+    policy = MemoryPolicy(daily_model_token_limit=100, per_task_model_token_limit=100)
+    service = MemoryService(tmp_path / "reaper.sqlite3", policy=policy, clock=clock)
+    # Burn the whole daily quota with reservations that never settle or release.
+    service.reserve_model_tokens("sui", reservation("stale-1", 45, 5))
+    service.reserve_model_tokens("sui", reservation("stale-2", 45, 5))
+    assert service.budget_snapshot("sui")["remaining_tokens"] == 0
+    assert_error(
+        "model_token_budget_exceeded",
+        service.reserve_model_tokens,
+        "sui",
+        reservation("fresh-blocked", 10, 0),
+    )
+    # Fresh holds are untouched; only older-than-TTL rows are reaped.
+    clock.value += timedelta(minutes=31)
+    reaped = service.reap_model_reservations()
+    assert reaped == 2
+    assert service.reserve_model_tokens("sui", reservation("stale-1", 45, 5))["status"] == (
+        "released"
+    )
+    quota = service.budget_snapshot("sui")
+    assert quota["reserved_tokens"] == 0 and quota["remaining_tokens"] == 100
+    # After reaping, a new job can reserve again within the same day.
+    again = service.reserve_model_tokens("sui", reservation("fresh-ok", 10, 0))
+    assert again["new_reservation"] and again["token_quota"]["remaining_tokens"] == 90
+    assert service.reap_model_reservations() == 0
+
+
+def test_reserve_automatically_reaps_old_holds_and_preserves_late_billing(tmp_path):
+    clock = Clock()
+    service = MemoryService(
+        tmp_path / "automatic-reaper.sqlite3",
+        clock=clock,
+        policy=MemoryPolicy(daily_model_token_limit=100, per_task_model_token_limit=100),
+    )
+    service.reserve_model_tokens("other", reservation("old-hold", 70, 0))
+    clock.value += timedelta(minutes=30)
+    assert service.reap_model_reservations() == 0
+    service.reserve_model_tokens("sui", reservation("recent-hold", 20, 0))
+    clock.value += timedelta(seconds=1)
+    result = service.reserve_model_tokens("sui", reservation("new-hold", 50, 0))
+    assert result["token_quota"]["reserved_tokens"] == 70
+    old = service.reserve_model_tokens("other", reservation("old-hold", 70, 0))
+    assert old["status"] == "released" and not old["new_reservation"]
+    late = service.settle_model_tokens("other", "old-hold", {"input_tokens": 5, "output_tokens": 2})
+    assert late["settled_after_release"]
+    assert service.budget_snapshot("sui")["spent_tokens"] == 7
+
+
 def test_actual_provider_overrun_is_recorded_and_blocks_new_jobs(tmp_path):
     policy = MemoryPolicy(daily_model_token_limit=100, per_task_model_token_limit=100)
     path = tmp_path / "overrun.sqlite3"
