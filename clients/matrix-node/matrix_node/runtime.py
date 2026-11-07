@@ -80,6 +80,10 @@ class MatrixRuntime:
         self._sender_stop = threading.Event()
         # Typing observation: (room_id) -> last monotonic attention report.
         self._typing_seen: dict[str, float] = {}
+        # Lease renewal: keeps companions owned by this node leased while a
+        # slow dialogue round-trip (long model call) outlives the short TTL.
+        self._lease_thread: threading.Thread | None = None
+        self._lease_stop = threading.Event()
         if self._e2ee is not None:
             self._e2ee.on_message(self._on_sidecar_message)
             self._e2ee.on_verification(self._on_sidecar_verification)
@@ -470,11 +474,45 @@ class MatrixRuntime:
                     continue
             self.drain_sends()
 
+    def _renew_companion_lease(self, companion: str) -> None:
+        """Renew the lease for one bound companion if this node owns it.
+
+        The renew body carries only node_id + epoch (the server schema is
+        strict about extra fields), and errors are logged at debug level so
+        an unreachable runtime never floods the log from the renewal loop.
+        """
+        try:
+            state = self._api.get_companion(companion)
+        except TransportError as exc:
+            LOGGER.debug("lease_lookup_failed companion=%s reason=%s", companion, exc.code)
+            return
+        if state.get("active_node_id") != self._config.node_id:
+            return
+        try:
+            self._api.renew_lease(
+                companion,
+                {"node_id": self._config.node_id, "epoch": state.get("epoch", 0)},
+            )
+        except TransportError as exc:
+            LOGGER.debug("lease_renew_failed companion=%s reason=%s", companion, exc.code)
+
+    def _lease_loop(self) -> None:
+        """Periodically renew leases for companions bound to this node so a
+        slow dialogue round-trip never outlives the short lease TTL."""
+        while not self._lease_stop.is_set():
+            if self._lease_stop.wait(self._config.lease_renew_seconds):
+                break
+            for binding in self._config.rooms:
+                self._renew_companion_lease(binding.companion_id)
+
     def run(self, stop: threading.Event) -> int:
         backoff = 1.0
         self._sender_stop = threading.Event()
         self._sender = threading.Thread(target=self._sender_loop, name="mx-sender", daemon=True)
         self._sender.start()
+        self._lease_stop = threading.Event()
+        self._lease_thread = threading.Thread(target=self._lease_loop, name="mx-lease", daemon=True)
+        self._lease_thread.start()
         try:
             while not stop.is_set():
                 try:
@@ -522,9 +560,12 @@ class MatrixRuntime:
                     backoff = min(backoff * 2, 60.0)
         finally:
             self._sender_stop.set()
+            self._lease_stop.set()
             with self._send_cond:
                 self._send_cond.notify_all()
             if self._sender is not None:
                 self._sender.join(timeout=2.0)
+            if self._lease_thread is not None:
+                self._lease_thread.join(timeout=2.0)
             self._pool.shutdown(wait=True)
         return 0

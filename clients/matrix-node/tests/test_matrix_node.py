@@ -9,6 +9,7 @@ import json
 import unittest
 from pathlib import Path
 
+from matrix_node.api import TransportError
 from matrix_node.config import ConfigError, load_config
 from matrix_node.e2ee_bridge import E2eeBridge
 from matrix_node.matrix import (
@@ -241,6 +242,7 @@ class FakeApi:
         self.attention_calls = []
         self.dialogue_calls = []
         self.follow_calls = []
+        self.lease_calls = []
         self.companion = {"revision": 1, "epoch": 0}
 
     def register(self, node_id, label, capabilities):
@@ -260,6 +262,10 @@ class FakeApi:
         # Simulate the server bumping revision/epoch on a successful follow.
         self.companion["revision"] += 1
         self.companion["epoch"] += 1
+        return {"ok": True}
+
+    def renew_lease(self, companion_id, payload):
+        self.lease_calls.append((companion_id, payload))
         return {"ok": True}
 
     def dialogue(self, companion_id, payload):
@@ -911,6 +917,47 @@ class TestDispatchAndTyping(unittest.TestCase):
         runtime, api, _ = self._runtime()
         runtime.handle_typing("!room1:matrix.example.org", "@bot:matrix.example.org")
         self.assertEqual(api.attention_calls, [])
+
+
+class TestLeaseRenew(unittest.TestCase):
+    def _runtime(self):
+        path = Path("/tmp/mx_runtime_config.json")
+        path.write_text(json.dumps(CONFIG), encoding="utf-8")
+        config = load_config(path)
+        api = FakeApi()
+        client = FakeMatrix()
+        return MatrixRuntime(config, api, client), api, client
+
+    def test_renews_lease_for_owned_companion(self):
+        runtime, api, _ = self._runtime()
+        api.companion["active_node_id"] = "matrix-room"
+        api.companion["epoch"] = 3
+        runtime._renew_companion_lease("sui")
+        self.assertEqual(
+            api.lease_calls,
+            [("sui", {"node_id": "matrix-room", "epoch": 3})],
+        )
+
+    def test_skips_companion_held_by_other_node(self):
+        runtime, api, _ = self._runtime()
+        api.companion["active_node_id"] = "other-node"
+        runtime._renew_companion_lease("sui")
+        self.assertEqual(api.lease_calls, [])
+
+    def test_transport_errors_are_swallowed(self):
+        runtime, api, _ = self._runtime()
+        api.companion["active_node_id"] = "matrix-room"
+
+        def boom(*args, **kwargs):
+            raise TransportError("api_unreachable")
+
+        api.get_companion = boom
+        # Lookup failure must not propagate out of the lease loop.
+        runtime._renew_companion_lease("sui")
+        api.renew_lease = boom
+        api.get_companion = lambda companion_id: dict(api.companion)
+        runtime._renew_companion_lease("sui")
+        self.assertEqual(api.lease_calls, [])
 
 
 if __name__ == "__main__":

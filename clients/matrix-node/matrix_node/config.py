@@ -120,6 +120,7 @@ class MatrixConfig:
     handle_workers: int
     observe_typing: bool
     typing_attention_min_interval: float
+    lease_renew_seconds: float
     e2ee: bool
     e2ee_sidecar: str | None
     e2ee_config: dict[str, Any] | None
@@ -201,6 +202,7 @@ def load_config(path: Path) -> MatrixConfig:
         "handle_workers",
         "observe_typing",
         "typing_attention_min_interval",
+        "lease_renew_seconds",
         "e2ee",
         "e2ee_sidecar",
         "e2ee_config",
@@ -284,7 +286,7 @@ def load_config(path: Path) -> MatrixConfig:
             number(data.get("sync_timeout_ms", 30000), minimum=1000, maximum=60000)
         ),
         request_timeout_seconds=number(
-            data.get("request_timeout_seconds", 40), minimum=0.1, maximum=90
+            data.get("request_timeout_seconds", 40), minimum=0.1, maximum=600
         ),
         max_history=int(number(data.get("max_history", 6), minimum=0, maximum=20)),
         max_output_tokens=int(number(data.get("max_output_tokens", 512), minimum=1, maximum=1024)),
@@ -319,6 +321,7 @@ def load_config(path: Path) -> MatrixConfig:
         typing_attention_min_interval=number(
             data.get("typing_attention_min_interval", 8), minimum=0.5, maximum=3600
         ),
+        lease_renew_seconds=number(data.get("lease_renew_seconds", 5), minimum=1, maximum=3600),
         e2ee=e2ee,
         e2ee_sidecar=e2ee_sidecar,
         e2ee_config=e2ee_config,

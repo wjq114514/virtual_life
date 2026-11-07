@@ -146,3 +146,6 @@ class ApiClient:
 
     def follow_room(self, companion_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         return self._post(f"/v1/companions/{quote(companion_id, safe='')}/follow", payload)
+
+    def renew_lease(self, companion_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        return self._post(f"/v1/companions/{quote(companion_id, safe='')}/lease", payload)
