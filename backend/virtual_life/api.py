@@ -14,6 +14,7 @@ from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, FastAPI, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse, Response, StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.staticfiles import StaticFiles
@@ -970,6 +971,13 @@ def create_app(
 
     app.add_middleware(DeploymentBodyLimit)
     app.add_middleware(RequestLogMiddleware, access=settings.log_access)
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=list(settings.cors_origins),
+        allow_methods=["GET"],
+        allow_headers=["Authorization", "Accept"],
+        allow_credentials=False,
+    )
     router = APIRouter(prefix="/v1", dependencies=[Depends(authorize)])
     router.include_router(build_voice_router(voice))
     router.include_router(build_dist_router(settings))

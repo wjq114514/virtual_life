@@ -63,7 +63,7 @@ uv run uvicorn virtual_life.main:app --env-file .env --host 127.0.0.1 --port 800
 | --- | --- |
 | `[server]` | 新启动入口的监听 host、port |
 | `[logging]` | 控制台/文件日志级别、轮转大小与保留数量、HTTP 访问日志 |
-| `[runtime]` | 数据库、API token、节点在线期限、输出租约、迁移期限、房间自动跟随开关与安静窗口、轮询与认证超时、WebUI 会话期限 |
+| `[runtime]` | 数据库、API token、节点在线期限、输出租约、迁移期限、房间自动跟随开关与安静窗口、轮询与认证超时、WebUI 会话期限、精确 CORS 来源列表 |
 | `[model]` | Chat Completions 根地址、模型名、密钥、HTTP 超时、额外参数；留空时本地 provider 不构建（`internal` 生成返回 503 `model_not_configured`，`external` 生成仍可 park+commit，DSH 全权模式）。本地 llama.cpp 推理模型（Qwen3.5-35B 等）须在 `extra_body` 设 `chat_template_kwargs.enable_thinking=false` 才能真正关闭推理链（`thinking.type="disabled"` 对 llama.cpp 无效），否则模型先输出 `reasoning_content` 吃掉对话预算，`content` 为空导致 `model_invalid_response` |
 | `[scene_classifier]` | 本地场景分类器模式（off/observe/route）、模型产物、推理后端、超时与标签到回复模型的映射 |
 | `[automatic_memory]` | 自动记忆开关、批次、最大等待、轮询、输出 token 上限 |
@@ -122,6 +122,8 @@ uv run uvicorn virtual_life.main:app --env-file .env --host 127.0.0.1 --port 800
 
 端点挂在已鉴权的 `/v1` 之下：`GET /v1/dist/manifest.json` 返回按版本升序排列的清单，`GET /v1/dist/packages/{wheel}` 下载，`POST /v1/dist/packages` 上传。下载只需普通 Bearer token；上传额外要求 `upload_secret`，因此泄漏的 `api_token` 无法替换后续座位将要下载的客户端。文件名必须匹配 `virtual_life_linux-<版本>-py3-none-any.whl`，不匹配一律 400。
 
+DSH Virtual Life History 侧栏使用只读跨源 GET。可在 `[runtime]` 中配置 `cors_origins` 精确允许浏览器来源（例如 `http://192.168.1.126:3080`）；仅开放 GET 和 `Authorization`/`Accept` 请求头，不允许携带 cookie。默认空列表，即不启用跨源访问。API仍要求常规 Bearer token。
+
 清单由目录内容派生，条目按 (mtime, size) 缓存，发布新客户端只需上传，无需重启。`default_version` 取最高版本，且正式版本序号高于其自身的预发布版本。
 
 发布一个客户端：
@@ -146,6 +148,7 @@ curl -H "Authorization: Bearer $OWNER_TOKEN" \
 | `logging.<字段>` | `VIRTUAL_LIFE_LOGGING_<字段大写>` |
 | `runtime.database_path` | `VIRTUAL_LIFE_DATABASE` |
 | `runtime.api_token` | `VIRTUAL_LIFE_API_TOKEN` |
+| `runtime.cors_origins` | `VIRTUAL_LIFE_CORS_ORIGINS`，使用 JSON 字符串数组 |
 | `runtime.auto_follow_rooms` | `VIRTUAL_LIFE_AUTO_FOLLOW_ROOMS` |
 | `runtime.auto_follow_quiet_seconds` | `VIRTUAL_LIFE_AUTO_FOLLOW_QUIET_SECONDS` |
 | `runtime.<其余字段>` | `VIRTUAL_LIFE_<字段大写>`，例如 `VIRTUAL_LIFE_EVENT_POLL_SECONDS` |

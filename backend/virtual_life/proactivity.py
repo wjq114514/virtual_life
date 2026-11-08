@@ -520,8 +520,8 @@ class ProactivityService:
                 """INSERT INTO scheduled_tasks
                     (task_id, companion_id, command_id, tool_call_id, source_event_id,
                      title, details, due_at, status, reason, candidate_id,
-                     created_at, updated_at, fired_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL, NULL, ?, ?, NULL)""",
+                     created_at, updated_at, fired_at, next_attempt_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL, NULL, ?, ?, NULL, ?)""",
                 (
                     task_id,
                     companion_id,
@@ -711,6 +711,13 @@ class ProactivityService:
                 continue
             idle = self._idle_reason(connection, row["companion_id"], now)
             if idle is not None:
+                if idle == "user_interacting":
+                    connection.execute(
+                        "UPDATE scheduled_tasks SET reason=?, updated_at=? "
+                        "WHERE task_id=? AND status='pending'",
+                        (idle, _timestamp(now), row["task_id"]),
+                    )
+                    continue
                 self._miss_task(connection, row, now, idle)
                 continue
             companion = self.coordinator._companion(companion_row)

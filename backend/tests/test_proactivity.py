@@ -686,6 +686,18 @@ def test_proactivity_poll_configuration(tmp_path, monkeypatch):
         Settings.load(config)
 
 
+def test_runtime_cors_origins_configuration(tmp_path, monkeypatch):
+    config = tmp_path / "runtime.toml"
+    config.write_text('[runtime]\ncors_origins = ["http://192.168.1.126:3080"]\n', encoding="utf-8")
+    monkeypatch.delenv("VIRTUAL_LIFE_CORS_ORIGINS", raising=False)
+    assert Settings.load(config).cors_origins == ("http://192.168.1.126:3080",)
+    monkeypatch.setenv("VIRTUAL_LIFE_CORS_ORIGINS", '["http://localhost:3080"]')
+    assert Settings.load(config).cors_origins == ("http://localhost:3080",)
+    monkeypatch.setenv("VIRTUAL_LIFE_CORS_ORIGINS", "not-json")
+    with pytest.raises(ValueError):
+        Settings.load(config)
+
+
 def test_schedule_and_boundary_user_message_carry_context(runtime):
     """P0-2: schedule/boundary scaffolds carry current context, stay short."""
     policy(runtime, cooldown_seconds=60, daily_limit=5)  # both origins may dispatch in one test

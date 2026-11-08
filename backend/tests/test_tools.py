@@ -282,6 +282,64 @@ def test_schedule_task_tool_persists_fires_and_is_idempotent(tmp_path):
         client.close()
 
 
+def test_scheduled_task_waits_for_quiet_window_before_firing(tmp_path):
+    provider = Provider()
+    provider.tool_call = ToolCall(
+        "call-1",
+        "schedule_task",
+        '{"title": "喝水", "delay_seconds": 900}',
+    )
+    client, app, clock, _ = make_runtime(tmp_path, provider)
+    try:
+        assert send(client, "create-reminder").status_code == 200
+        task = client.get("/v1/companions/sui/scheduled-tasks").json()["items"][0]
+        current = client.get("/v1/companions/sui/proactivity").json()
+        client.post(
+            "/v1/companions/sui/proactivity",
+            json={
+                "command_id": "enable-reminders",
+                "expected_revision": current["revision"],
+                "policy": {**current["policy"], "enabled": True},
+            },
+        )
+
+        clock.value += timedelta(seconds=901)
+        assert send(client, "recent-chat").status_code == 200
+        assert app.state.proactivity.process_next() is None
+        task = client.get("/v1/companions/sui/scheduled-tasks").json()["items"][0]
+        assert task["status"] == "pending"
+        assert task["reason"] == "user_interacting"
+        assert not events(client, "companion.scheduled_task_missed")
+
+        clock.value += timedelta(seconds=61)
+        sample = {
+            "session_id": "session",
+            "sequence": 1,
+            "sampled_at": clock.value.isoformat(),
+            "activity": "docs",
+            "focus": "unfocused",
+            "availability": "available",
+            "user_present": True,
+            "locked": False,
+            "meeting": False,
+            "screen_sharing": False,
+            "boundary": "none",
+        }
+        assert (
+            client.post(
+                "/v1/nodes/desk/attention",
+                json={"command_id": "quiet-attention", "sample": sample},
+            ).status_code
+            == 200
+        )
+        result = app.state.proactivity.process_next()
+        assert result["status"] == "awaiting_generation", result
+        task = client.get("/v1/companions/sui/scheduled-tasks").json()["items"][0]
+        assert task["status"] == "queued"
+    finally:
+        client.close()
+
+
 def test_schedule_task_tool_rejects_invalid_delay(tmp_path):
     provider = Provider()
     provider.tool_call = ToolCall(

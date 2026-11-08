@@ -1,0 +1,21 @@
+{
+  "virtualLifeHistory": {
+    "title": "Virtual Life History",
+    "description": "Read-only conversation history from a Virtual Life companion.",
+    "token": "Runtime API token",
+    "filter": "Filter messages",
+    "all": "All",
+    "user": "You",
+    "assistant": "Companion",
+    "system": "Other",
+    "refresh": "Refresh history",
+    "error": "Could not load history",
+    "loading": "Loading history…",
+    "empty": "No messages found.",
+    "older": "Load older messages"
+  },
+  "meta": {
+    "title": "Virtual Life History",
+    "description": "Read-only conversation history from a Virtual Life companion."
+  }
+}

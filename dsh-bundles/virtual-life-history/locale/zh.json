@@ -1,0 +1,21 @@
+{
+  "virtualLifeHistory": {
+    "title": "Virtual Life 会话历史",
+    "description": "只读浏览 Virtual Life 伙伴的对话记录。",
+    "token": "运行时 API 令牌",
+    "filter": "筛选消息",
+    "all": "全部",
+    "user": "你",
+    "assistant": "伙伴",
+    "system": "其他",
+    "refresh": "刷新历史",
+    "error": "加载历史失败",
+    "loading": "正在加载历史…",
+    "empty": "暂无会话记录。",
+    "older": "加载更早记录"
+  },
+  "meta": {
+    "title": "Virtual Life 会话历史",
+    "description": "只读浏览 Virtual Life 伙伴的对话记录。"
+  }
+}

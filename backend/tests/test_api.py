@@ -427,6 +427,37 @@ def test_flow_logs_require_auth_and_ring_captures_lines(client):
     assert page["next_sequence"] == 0 and page["items"] == []
 
 
+def test_history_cors_allows_only_dsh_origin_and_get(tmp_path):
+    origin = "http://192.168.1.126:3080"
+    settings = Settings(
+        database_path=str(tmp_path / "cors.sqlite3"),
+        api_token="test-token",
+        cors_origins=(origin,),
+    )
+    with TestClient(create_app(settings), headers={"Authorization": "Bearer test-token"}) as client:
+        preflight = client.options(
+            "/v1/companions/sui/dialogue/history",
+            headers={
+                "Origin": origin,
+                "Access-Control-Request-Method": "GET",
+                "Access-Control-Request-Headers": "authorization",
+            },
+        )
+        assert preflight.status_code == 200
+        assert preflight.headers["access-control-allow-origin"] == origin
+        assert "GET" in preflight.headers["access-control-allow-methods"]
+        assert "authorization" in preflight.headers["access-control-allow-headers"].lower()
+
+        denied = client.options(
+            "/v1/companions/sui/dialogue/history",
+            headers={
+                "Origin": "https://untrusted.example",
+                "Access-Control-Request-Method": "GET",
+            },
+        )
+        assert "access-control-allow-origin" not in denied.headers
+
+
 def test_flow_logs_validate_cursor_and_limit(client):
     assert client.get("/v1/flow/logs?after_sequence=-1").status_code == 422
     assert client.get("/v1/flow/logs?limit=0").status_code == 422

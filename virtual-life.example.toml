@@ -38,6 +38,8 @@ reconcile_seconds = 0.5
 websocket_auth_timeout_seconds = 5.0
 # WebUI 会话 cookie 保存天数；0 表示永不记住令牌，每次打开页面都要输入。
 webui_session_days = 30
+# 允许读取会话历史的浏览器来源；仅用于跨源只读 GET。
+# cors_origins = ["http://192.168.1.126:3080"]
 
 [model]
 # base_url 与 name 必须同时填写或同时留空。

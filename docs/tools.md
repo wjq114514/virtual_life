@@ -141,7 +141,7 @@ app.state.tools.register(EchoTool())
 
 `schedule_task` 接受 `{title, details?, delay_seconds}`，创建一条持久化计划任务/提醒。`delay_seconds` 固定限制为 60..2592000 秒（30 天），标题最多 200 字符，详情最多 2000 字符；同一 `command_id:tool_call_id` 幂等。到点后任务转换为 `origin=task` 的主动候选，仍经过用户静默、注意力、人格、预算、租约、冷却和每日限额。它只提醒，不执行外部操作；需要后台执行时使用 `delegate_task`。
 
-任务状态包括 `pending`、`queued`、`completed`、`silent`、`suppressed`、`discarded`、`failed`、`cancelled` 和 `missed`。到点时没有在线节点或用户不满足静默条件会标记为 `missed` 并发布事件；通过 gate 但最终未生成文字会保留 `silent` 或对应丢弃原因。可用 `GET /v1/companions/{id}/scheduled-tasks` 查看，`DELETE /v1/companions/{id}/scheduled-tasks/{task_id}` 取消尚未执行的任务。
+任务状态包括 `pending`、`queued`、`completed`、`silent`、`suppressed`、`discarded`、`failed`、`cancelled` 和 `missed`。到点时没有在线节点会标记为 `missed` 并发布事件；若用户尚未满足静默条件，任务保留 `pending`，主动工作器会在后续轮询重试，到静默窗口满足后再入队。通过 gate 但最终未生成文字会保留 `silent` 或对应丢弃原因。可用 `GET /v1/companions/{id}/scheduled-tasks` 查看，`DELETE /v1/companions/{id}/scheduled-tasks/{task_id}` 取消尚未执行的任务。
 
 `list_scheduled_tasks` 接受可选的 `status` 和 `limit`（1..20）。`status=active` 表示 `pending` 或 `queued`；也可以指定任一终态。结果按创建时间倒序返回任务 ID、标题、状态、原因和到期时间，用于在同一次工具轮次中回答“有哪些提醒”；模型结果不回传完整详情以保持在 16 KiB 限制内。
 

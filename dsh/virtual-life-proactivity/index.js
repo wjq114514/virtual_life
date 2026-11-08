@@ -123,12 +123,28 @@ async function deliver(ctx, cfg, args, sessionId) {
   if (!ctx.schedule) throw new Error('the schedule service is not available in this profile');
   // Ensure the fixed delivery identity exists before arming a delivery into it.
   await ensureSession(ctx, cfg, args, sessionId);
-  const { companionId, nodeId, accessId } = args;
-  const cursorKey = `${companionId}|${nodeId}|${accessId}`;
+  const { companionId } = args;
   const companion = await runtimeFetch(
     cfg.baseUrl, cfg.token, `/v1/companions/${encodeURIComponent(companionId)}`,
   );
-  const epoch = args.epoch ?? companion.epoch ?? 0;
+  // Ownership is authoritative in the runtime. A fixed configured node goes
+  // stale after follow/transfer and turns every lease/output request into 409.
+  const nodeId = companion.active_node_id || companion.activeNodeId;
+  if (!nodeId) return { companionId, nodeId: null, skipped: 'no_active_node' };
+  const mapping = cfg.sessions.find((entry) => entry.companionId === companionId);
+  let accessId = nodeId === args.nodeId ? args.accessId : mapping?.accessByNode?.[nodeId];
+  if (!accessId) {
+    const opened = await openAccess(cfg.baseUrl, cfg.token, nodeId, 'DSH poller');
+    accessId = opened.access_id || opened.accessId;
+    if (!accessId) throw new Error(`runtime did not return web access for active node ${nodeId}`);
+    if (mapping) {
+      mapping.accessByNode ||= {};
+      mapping.accessByNode[nodeId] = accessId;
+    }
+    if (nodeId === args.nodeId) args.accessId = accessId;
+  }
+  const cursorKey = companionId;
+  const epoch = companion.epoch ?? args.epoch ?? 0;
   if (cfg.keepNodeAlive) {
     try {
       await heartbeatNode(cfg.baseUrl, cfg.token, nodeId);
@@ -138,22 +154,20 @@ async function deliver(ctx, cfg, args, sessionId) {
     try {
       await heartbeatAccess(cfg.baseUrl, cfg.token, nodeId, accessId);
     } catch (error) {
-      // A stale access (TTL expired while dsh-web was down) is recreated here so
-      // the poller self-heals instead of erroring every tick. The new access id
-      // replaces the configured one in this process; the next heartbeat uses it.
+      // Reopen an expired binding and preserve the companion-global cursor.
       if (String(error.message).includes('node_access_expired') || String(error.message).includes('404')) {
-        try {
-          const opened = await openAccess(cfg.baseUrl, cfg.token, nodeId, 'DSH poller');
-          const freshAccess = opened.access_id || opened.accessId;
-          if (freshAccess) {
-            // Drop the stale cursor so the fresh access re-opens a clean
-            // subscription, then adopt the new access id for this and later ticks.
-            cursors.delete(cursorKey);
-            args.accessId = freshAccess;
+        const opened = await openAccess(cfg.baseUrl, cfg.token, nodeId, 'DSH poller');
+        const freshAccess = opened.access_id || opened.accessId;
+        if (freshAccess) {
+          accessId = freshAccess;
+          if (mapping) {
+            mapping.accessByNode ||= {};
+            mapping.accessByNode[nodeId] = freshAccess;
           }
-        } catch {
-          // If recreation fails (node offline), let the poll report the error.
+          if (nodeId === args.nodeId) args.accessId = freshAccess;
         }
+      } else {
+        throw error;
       }
     }
   }

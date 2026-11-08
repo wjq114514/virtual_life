@@ -59,6 +59,7 @@ _CONFIG_SECTIONS = {
         "reconcile_seconds": "reconcile_seconds",
         "websocket_auth_timeout_seconds": "websocket_auth_timeout_seconds",
         "webui_session_days": "webui_session_days",
+        "cors_origins": "cors_origins",
     },
     "model": {
         "base_url": "model_base_url",
@@ -581,6 +582,7 @@ class Settings:
     websocket_auth_timeout_seconds: float = 5.0
     # WebUI session cookie lifetime in days; 0 refuses to remember the token.
     webui_session_days: int = 30
+    cors_origins: tuple[str, ...] = ()
     model_base_url: str = ""
     model_name: str = ""
     model_api_key: str = field(default="", repr=False)
@@ -691,6 +693,15 @@ class Settings:
         for name in _STRING_FIELDS:
             if not isinstance(getattr(self, name), str):
                 raise ValueError(f"{name} must be a string")
+        if not isinstance(self.cors_origins, (tuple, list)) or not all(
+            isinstance(origin, str)
+            and origin == origin.strip()
+            and origin.startswith(("http://", "https://"))
+            and len(origin) <= 512
+            for origin in self.cors_origins
+        ):
+            raise ValueError("runtime.cors_origins must contain HTTP(S) origins")
+        object.__setattr__(self, "cors_origins", tuple(dict.fromkeys(self.cors_origins)))
         for name in _INTEGER_FIELDS:
             if type(getattr(self, name)) is not int:
                 raise ValueError(f"{name} must be an integer")
@@ -1025,7 +1036,9 @@ class Settings:
                     kind = _SECTION_KINDS[section][key]
                     env_name = f"VIRTUAL_LIFE_{section.upper()}_{key.upper()}"
                 else:
-                    if setting_name in _STRING_FIELDS:
+                    if setting_name == "cors_origins":
+                        kind = list
+                    elif setting_name in _STRING_FIELDS:
                         kind = str
                     elif setting_name in _INTEGER_FIELDS or setting_name == "embedding_dimensions":
                         kind = int

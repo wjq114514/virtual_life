@@ -1,0 +1,4 @@
+- insert:
+    - id: virtual-life-history
+      name: '@local/virtual-life-history'
+      config: {}
